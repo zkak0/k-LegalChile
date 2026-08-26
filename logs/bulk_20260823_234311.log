@@ -1,4 +1,0 @@
-Traceback (most recent call last):
-  File "/Users/claudiomarquez/Desktop/VH/chilean-legal-mcp/src/chilean_legal_mcp/ingest.py", line 7, in <module>
-    from .db import NormasDB
-ImportError: attempted relative import with no known parent package

@@ -16,3 +16,6 @@ node_modules/
 data/cookies/
 data/*.db
 casos/*.pdf
+logs/
+casos/
+casos_docs/
