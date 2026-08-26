@@ -40,11 +40,11 @@ WORKFLOWS = {
                 "Ejecuta investigación multi-fuente según el plan: "
                 "analizar_consulta (informe I-V), buscar_normas (legislación), "
                 "buscar_jurisprudencia (fallos), buscar_dictamenes (CGR), "
-                "buscar_semantico (embeddings si indexado). Acumula citas verificables."
+                "buscar_semantico (embeddings si indexado), jpl_buscar_ley/jpl_buscar_texto/jpl_buscar_ordenanza (corpus JPL si está instalado). Acumula citas verificables."
             ),
             herramienta="analizar_consulta",
             parametros={"consulta": "{consulta_usuario}"},
-            salida_esperada="Conjunto de fuentes oficiales con citas (Ley N°, fecha, URL).",
+            salida_esperada="Conjunto de fuentes oficiales + JPL (si instalado) con citas (Ley N°, fecha, URL).",
         ),
         PasoWorkflow(
             nombre="redactar",
@@ -91,13 +91,13 @@ WORKFLOWS = {
         PasoWorkflow(
             nombre="investigar",
             descripcion=(
-                "Ejecuta búsquedas paralelas: buscar_todo (multi-fuente), buscar_semantico "
+                "Ejecuta búsquedas paralelas: buscar_todo (multi-fuente, incluye JPL si está instalado), buscar_semantico "
                 "(si indexado), vigilancia_crear (para seguimiento), expediente_indexar "
-                "(si hay documentos propios). Itera refinando queries."
+                "(si hay documentos propios), jpl_buscar_texto (corpus JPL 344 comunas si está instalado). Itera refinando queries."
             ),
             herramienta="buscar_todo",
             parametros={"consulta": "{consulta_usuario}", "limite": 10},
-            salida_esperada="Corpus de fuentes oficiales organizado por materia y relevancia.",
+            salida_esperada="Corpus de fuentes oficiales + JPL (si instalado) organizado por materia y relevancia.",
         ),
         PasoWorkflow(
             nombre="sintetizar",
@@ -136,7 +136,7 @@ WORKFLOWS = {
             nombre="investigar",
             descripcion=(
                 "Ejecuta herramientas según clasificación: estado_vigencia, buscar_jurisprudencia, "
-                "buscar_normas, buscar_dictamenes, ayuda_acceso_abogado."
+                "buscar_normas, buscar_dictamenes, jpl_buscar_ley/jpl_buscar_texto (JPL si es materia de policía local), ayuda_acceso_abogado."
             ),
             herramienta="buscar_normas",
             parametros={"consulta": "{consulta_usuario}", "limite": 8},

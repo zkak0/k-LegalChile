@@ -1,8 +1,8 @@
 # chilean-legal-mcp
 
-Servidor MCP de investigación legal chilena — 15 herramientas, fuentes oficiales verificables, sin registro ni créditos. Mejor que Trifolia: local, ilimitado, con cuerpo FTS, semántica híbrida y export Word/PDF.
+Servidor MCP de investigación legal chilena — 77 herramientas, fuentes oficiales verificables, sin registro ni créditos. Local, ilimitado, con cuerpo FTS, semántica híbrida, export Word/PDF y corpus JPL opcional.
 
-## Qué hace (15 tools)
+## Qué hace (77 tools: 68 base + 9 JPL)
 
 | Herramienta | Fuente | Qué devuelve |
 |---|---|---|
@@ -16,10 +16,14 @@ Servidor MCP de investigación legal chilena — 15 herramientas, fuentes oficia
 | `buscar_doctrina` | BCN Articulo 30k + fallback | Artículos |
 | `historial_norma` | BCN `hasVersion/modifiesTo` | Vigencia y relaciones |
 | `buscar_scielo` / `buscar_dt` / `buscar_diario_oficial` | SciELO, DT, Diario Oficial | Doctrina y normativa sectorial |
-| `buscar_todo` | Paralelo real `ThreadPoolExecutor(4)` | Multi-fuente en 1 llamada |
-| `ayuda_acceso_abogado` | — | 6 links oficiales |
+| `buscar_todo` | Paralelo real `ThreadPoolExecutor(5)` — incluye JPL si está instalado | Multi-fuente en 1 llamada |
+| `jpl_buscar_ley` / `jpl_buscar_articulo` / `jpl_buscar_texto` | Corpus JPL local (53 leyes + ordenanzas 344 comunas) | Leyes JPL, artículos exactos, búsqueda global |
+| `jpl_buscar_ordenanza` / `jpl_listar_ordenanzas` | Ordenanzas municipales JPL | Ordenanzas por comuna/materia |
+| `jpl_generar_documento` | Corpus JPL + plantillas tribunal | Sentencias, resoluciones, oficios, comparendos |
+| `jpl_estado` | local | Estado del corpus JPL |
+| `ayuda_acceso_abogado` | — | Links oficiales |
 
-Todas las respuestas incluyen **cita y enlace a la fuente oficial**. Fechas chilenas `DD-MM-AAAA` en entrada y salida.
+Todas las respuestas incluyen **cita y enlace a la fuente oficial**. Fechas chilenas `DD-MM-AAAA` en entrada y salida. JPL auto-activo si `data/jpl/corpus.db.zlib` está instalado (ver `SETUP.md` + `scripts/install_jpl.py`).
 
 ## Instalación
 
@@ -47,17 +51,25 @@ Claude Desktop / OpenCode / Cursor / VS Code / Antigravity: `mcpServers: {"chile
 
 ```
 src/chilean_legal_mcp/
-  sparql_client.py  # BCN SPARQL + filtros fecha/tipo
-  db.py             # SQLite FTS5 (normas, textos, dictamenes) + check_same_thread=False
-  texto.py          # LeyChile obtxml XML
-  contraloria.py    # CGR Domino POST
+  sparql_client.py   # BCN SPARQL + filtros fecha/tipo
+  db.py              # SQLite FTS5 (normas, textos, dictamenes)
+  jpl/db.py          # Corpus JPL (53 leyes + 5939 ordenanzas 344 comunas) — auto-activo
+  jpl/generator.py   # Generador de documentos JPL
+  texto.py           # LeyChile obtxml XML
+  contraloria.py     # CGR Domino POST
   fuentes_externas.py # SciELO, DT, Diario Oficial
-  exportar.py       # docx/pdf
-  ingest.py         # incremental + bulk OFFSET
-  server.py         # FastMCP 15 tools, paralelo real
+  exportar.py        # docx/pdf
+  ingest.py          # incremental + bulk OFFSET
+  server.py          # FastMCP 77 tools (68 base + 9 JPL)
+  workflow.py        # Prompt multi-etapa
+  semantico.py       # Embeddings locales
+scripts/
+  install_jpl.py     # Instalador JPL (descarga corpus privado a data/jpl/)
 data/
-  normas.db (545)
-  jpl/README.md     # reservado Ley 18.287
+  normas.db          # 29k normas (se genera / se descarga)
+  jpl/
+    corpus.db.zlib   # 15 MB comprimido JPL (no va a git, se instala)
+    corpus.db        # 58 MB descomprimido + FTS (se genera al primer jpl_*)
 ```
 
 ## Fuentes (100% públicas, sin registro)

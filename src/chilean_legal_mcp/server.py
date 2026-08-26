@@ -1,6 +1,6 @@
 """Servidor MCP de investigación legal chilena — mejor que Trifolia.
 
-Herramientas (68):
+Herramientas (77):
 - buscar_normas: legislación con filtros fecha/tipo/materia + paginación offset + FTS body + DD-MM-AAAA.
 - obtener_texto_norma: texto completo XML LeyChile con chunk/offset.
 - estado_vigencia: VIGENTE/DEROGADA/REFUNDIDA leyendo el encabezado legal oficial renderizado.
@@ -15,6 +15,7 @@ Herramientas (68):
 - indexar_semantico / buscar_semantico / estado_indexacion: embeddings MiniLM multilingüe (Fase 3).
 - generar_escrito / generar_escrito_desde_investigacion / tipos_escrito_disponibles: redacción de escritos jurídicos (Fase 4).
 - iniciar_workflow / continuar_workflow / estado_workflow / listar_workflows: prompt multi-etapa planificar→investigar→redactar→autoverificar (Fase 5).
+- jpl_buscar_ley / jpl_buscar_articulo / jpl_verificar_vigencia / jpl_listar_leyes / jpl_listar_ordenanzas / jpl_buscar_ordenanza / jpl_buscar_texto / jpl_generar_documento / jpl_estado: corpus JPL (Ley 18.287 + ordenanzas 344 comunas, auto-activo si data/jpl/corpus.db existe).
 - buscar_scielo / buscar_dt / buscar_diario_oficial / buscar_suseso / buscar_tc / buscar_historia_ley / buscar_sii / buscar_cmf / buscar_tdlc / buscar_cplt / buscar_datos_gob: fuentes sectoriales oficiales.
 - buscar_todo: búsqueda multi-fuente paralela real (ThreadPoolExecutor 6 workers).
 - vigilancia_crear / vigilancia_listar / vigilancia_ejecutar / vigilancia_historial / vigilancia_marcar_revisados / vigilancia_eliminar / vigilancia_pausar: monitor legal automático (condición en lenguaje natural + fuentes oficiales, dedupe e informe narrativo).
@@ -121,6 +122,31 @@ from .workflow import (
     estado_workflow as _wf_estado,
     listar_workflows as _wf_listar,
 )
+from pathlib import Path as _Path
+# JPL — import condicional (solo si corpus disponible, pero tools siempre registradas con mensaje degradado)
+try:
+    from .jpl import db as _jpl_db
+    from .jpl import generator as _jpl_gen
+    _JPL_AVAILABLE = True
+except Exception:
+    _jpl_db = None  # type: ignore
+    _jpl_gen = None  # type: ignore
+    _JPL_AVAILABLE = False
+
+def _jpl_check() -> tuple[bool, str]:
+    """Verifica si JPL está instalado y FTS listo. Devuelve (ok, mensaje)."""
+    if not _JPL_AVAILABLE or _jpl_db is None:
+        return False, "JPL no instalado. Ejecuta: python scripts/install_jpl.py (requiere acceso al repo privado K-LegalJPL)."
+    # Existe corpus.db.zlib o corpus.db ?
+    jpl_root = _Path(__file__).resolve().parents[2] / "data" / "jpl"
+    has_zst = (jpl_root / "corpus.db.zlib").exists()
+    has_db = (jpl_root / "corpus.db").exists()
+    alt_zst = _Path(__file__).resolve().parents[3] / "K-LegalJPL" / "corpus.db.zlib"
+    alt_db = _Path(__file__).resolve().parents[3] / "K-LegalJPL" / "corpus.db"
+    if not (has_zst or has_db or alt_zst.exists() or alt_db.exists()):
+        return False, "JPL no instalado. Ejecuta: python scripts/install_jpl.py (requiere acceso al repo privado K-LegalJPL)."
+    return True, ""
+
 from .sparql_client import BCNClient, leychile_url
 from .texto import fetch_texto
 
@@ -486,6 +512,267 @@ def estado_workflow(nombre: str) -> str:
 def listar_workflows() -> str:
     """Lista todos los workflows multi-etapa disponibles."""
     return _wf_listar()
+
+
+# ── JPL — corpus de Juzgado de Policía Local (auto-activo si data/jpl/corpus.db existe) ──
+
+@mcp.tool()
+def jpl_buscar_ley(consulta: str, limite: int = 10) -> str:
+    """Busca un término en todas las leyes JPL del corpus (tránsito, alcoholes, consumidor, rentas, aseo, etc.). Corpus nacional JPL."""
+    ok, msg = _jpl_check()
+    if not ok:
+        return msg
+    consulta = consulta.strip()
+    if not consulta:
+        return "Error: consulta vacía."
+    try:
+        res = _jpl_db.buscar_ley(consulta, limite=min(limite, 20))  # type: ignore
+    except Exception as e:
+        return f"Error JPL buscar_ley: {e}"
+    if not res:
+        return f"JPL: sin resultados para '{consulta}'. Prueba términos más amplios o verifica con jpl_buscar_texto."
+    out = [f"JPL — LEYES para '{consulta}' ({len(res)}):", ""]
+    for r in res[:limite]:
+        ley = r.get("ley","")
+        titulo = r.get("titulo","")
+        out.append(f"• {ley} — {titulo}")
+        for ex in r.get("extractos",[])[:2]:
+            out.append(f"  → \"{ex[:180]}...\"")
+        out.append(f"  Coincidencias: {r.get('coincidencias',0)}")
+        out.append("")
+    out.append("Fuente: corpus JPL local (Ley 18.287 + 53 leyes vigentes). Usa jpl_buscar_articulo(ley, articulo) para el texto exacto.")
+    return "\n".join(out)
+
+
+@mcp.tool()
+def jpl_buscar_articulo(ley: str, articulo: int) -> str:
+    """Extrae el texto exacto de un artículo de una ley JPL (ej. ley='18.287', articulo=14)."""
+    ok, msg = _jpl_check()
+    if not ok:
+        return msg
+    ley = ley.strip()
+    if not ley:
+        return "Error: ley vacía."
+    try:
+        res = _jpl_db.buscar_articulo(ley, articulo)  # type: ignore
+    except Exception as e:
+        return f"Error JPL buscar_articulo: {e}"
+    if not res:
+        return f"JPL: artículo {articulo} no encontrado en '{ley}'. Verifica con jpl_verificar_vigencia('{ley}') o jpl_buscar_ley('{ley}')."
+    out = [f"JPL — ARTÍCULO {articulo} de {ley}:", ""]
+    for item in res:
+        texto = item.get("texto","")[:3000]
+        num = item.get("articulo", articulo)
+        out.append(f"Art. {num}: {texto}")
+        for n in item.get("numerales",[]):
+            if n.get("numeral"):
+                out.append(f"  N° {n['numeral']}: {n['texto'][:400]}...")
+        out.append("")
+    out.append("Fuente: corpus JPL local. Verifica vigencia con jpl_verificar_vigencia antes de citar.")
+    return "\n".join(out)
+
+
+@mcp.tool()
+def jpl_verificar_vigencia(ley: str) -> str:
+    """Devuelve metadatos de vigencia de una ley JPL: tipo, número, organismo, versión BCN vigente, estado (no derogado/derogado), idNorma."""
+    ok, msg = _jpl_check()
+    if not ok:
+        return msg
+    ley = ley.strip()
+    if not ley:
+        return "Error: ley vacía."
+    try:
+        res = _jpl_db.verificar_vigencia(ley)  # type: ignore
+    except Exception as e:
+        return f"Error JPL verificar_vigencia: {e}"
+    if not res:
+        return f"JPL: ley '{ley}' no encontrada en el corpus."
+    out = [f"JPL — VIGENCIA de '{ley}':", ""]
+    for m in res:
+        for k, v in m.items():
+            if v:
+                out.append(f"• {k}: {v}")
+        out.append("")
+    return "\n".join(out)
+
+
+@mcp.tool()
+def jpl_listar_leyes() -> str:
+    """Lista todas las leyes JPL disponibles en el corpus (53 leyes con metadatos)."""
+    ok, msg = _jpl_check()
+    if not ok:
+        return msg
+    try:
+        res = _jpl_db.listar_leyes()  # type: ignore
+    except Exception as e:
+        return f"Error JPL listar_leyes: {e}"
+    out = [f"JPL — LEYES en corpus ({len(res)}):", ""]
+    for r in res:
+        out.append(f"• {r.get('archivo','')} — {r.get('tipo','')} N° {r.get('numero','')} — {r.get('estado','')} — idNorma {r.get('idNorma','')}")
+    return "\n".join(out)
+
+
+@mcp.tool()
+def jpl_listar_ordenanzas(municipalidad: str | None = None) -> str:
+    """Lista ordenanzas JPL. Sin argumento: todas las municipalidades con conteo. Con municipalidad: ordenanzas de esa comuna."""
+    ok, msg = _jpl_check()
+    if not ok:
+        return msg
+    try:
+        res = _jpl_db.listar_ordenanzas(municipalidad)  # type: ignore
+    except Exception as e:
+        return f"Error JPL listar_ordenanzas: {e}"
+    if not res:
+        return f"JPL: sin ordenanzas para '{municipalidad}'." if municipalidad else "JPL: corpus de ordenanzas vacío."
+    if municipalidad is None:
+        out = [f"JPL — ORDENANZAS por municipalidad ({len(res)} comunas):", ""]
+        for r in res:
+            out.append(f"• {r.get('municipalidad','')}: {r.get('ordenanzas',0)} ordenanzas")
+        return "\n".join(out)
+    out = [f"JPL — ORDENANZAS de {municipalidad} ({len(res)}):", ""]
+    for r in res[:50]:
+        out.append(f"• {r.get('archivo','')} — N° {r.get('numero','')} — {r.get('estado','')}")
+    if len(res) > 50:
+        out.append(f"\n... y {len(res)-50} más. Usa jpl_buscar_ordenanza('{municipalidad}', 'materia') para filtrar.")
+    return "\n".join(out)
+
+
+@mcp.tool()
+def jpl_buscar_ordenanza(municipalidad: str, materia: str, limite: int = 10) -> str:
+    """Busca una materia dentro de las ordenanzas de una municipalidad JPL (ej. 'ruidos', 'aseo', 'ferias libres')."""
+    ok, msg = _jpl_check()
+    if not ok:
+        return msg
+    municipalidad = municipalidad.strip()
+    materia = materia.strip()
+    if not municipalidad or not materia:
+        return "Error: municipalidad y materia son requeridos."
+    try:
+        res = _jpl_db.buscar_ordenanza(municipalidad, materia, limite=min(limite,20))  # type: ignore
+    except Exception as e:
+        return f"Error JPL buscar_ordenanza: {e}"
+    if not res:
+        return f"JPL: sin resultados para '{materia}' en {municipalidad}. Prueba jpl_listar_ordenanzas('{municipalidad}') para ver disponibles."
+    out = [f"JPL — ORDENANZA '{materia}' en {municipalidad} ({len(res)}):", ""]
+    for r in res[:limite]:
+        out.append(f"• {r.get('archivo','')} — coincidencias: {r.get('coincidencias',0)}")
+        for ex in r.get("extractos",[])[:2]:
+            out.append(f"  → \"{ex[:180]}...\"")
+        out.append("")
+    return "\n".join(out)
+
+
+@mcp.tool()
+def jpl_buscar_texto(consulta: str, limite: int = 10) -> str:
+    """Búsqueda full-text en TODO el corpus JPL a la vez (leyes + ordenanzas 344 comunas + manuales)."""
+    ok, msg = _jpl_check()
+    if not ok:
+        return msg
+    consulta = consulta.strip()
+    if not consulta:
+        return "Error: consulta vacía."
+    try:
+        res = _jpl_db.buscar_texto(consulta, limite=min(limite,20))  # type: ignore
+    except Exception as e:
+        return f"Error JPL buscar_texto: {e}"
+    if not res:
+        return f"JPL: sin resultados para '{consulta}'."
+    out = [f"JPL — BÚSQUEDA GLOBAL '{consulta}' ({len(res)}):", ""]
+    for r in res[:limite]:
+        tipo = r.get("tipo","")
+        ref = r.get("referencia","")
+        out.append(f"• [{tipo}] {ref} — coincidencias: {r.get('coincidencias',0)}")
+        for ex in r.get("extractos",[])[:2]:
+            out.append(f"  → \"{ex[:180]}...\"")
+        out.append("")
+    return "\n".join(out)
+
+
+@mcp.tool()
+def jpl_generar_documento(tipo: str, datos: str, formato: str = "md") -> str:
+    """Genera documento judicial JPL (sentencia, resolucion, oficio, certificado, exhorto, comparendo, plazo). Datos es JSON string con {rol, comuna, denunciado, rut, domicilio, hecho, ley, articulo, dia, mes, ano}."""
+    ok, msg = _jpl_check()
+    if not ok:
+        return msg
+    tipo = tipo.strip()
+    if not tipo:
+        return "Error: tipo es requerido. Válidos: sentencia, resolucion, oficio, certificado, exhorto, comparendo, plazo."
+    if _jpl_gen is None:
+        return "Error: generador JPL no disponible."
+    try:
+        datos_dict = json.loads(datos) if isinstance(datos, str) and datos.strip().startswith("{") else {}
+        if isinstance(datos, dict):  # por si FastMCP ya deserializa
+            datos_dict = datos  # type: ignore
+    except Exception:
+        datos_dict = {}
+    # Si datos viene como string JSON pero el tool lo recibe ya parseado, manejar ambos
+    if isinstance(datos, str) and not datos.strip().startswith("{"):
+        # datos es JSON string mal formado, intentar parsear igual
+        try:
+            datos_dict = json.loads(datos)
+        except Exception:
+            return f"Error: datos debe ser JSON válido. Recibido: {datos[:200]}"
+    try:
+        res = _jpl_gen.generar(tipo, datos_dict, formato)  # type: ignore
+    except Exception as e:
+        return f"Error JPL generar_documento: {e}"
+    if "error" in res:
+        return f"JPL generar_documento error: {res['error']}"
+    out = [f"JPL — DOCUMENTO '{tipo}' generado:", ""]
+    out.append(res.get("documento_md","")[:6000])
+    out.append("")
+    ver = res.get("verificacion",{})
+    if ver:
+        out.append(f"Verificación: {ver.get('advertencia','')}")
+        out.append(f"Score: {ver.get('score','')}")
+    exp = res.get("export",{})
+    if exp and exp.get("ruta_md"):
+        out.append(f"Ruta: {exp.get('ruta_md')}")
+    if exp and exp.get("ruta_docx"):
+        out.append(f"Ruta DOCX: {exp.get('ruta_docx')}")
+    return "\n".join(out)
+
+
+@mcp.tool()
+def jpl_estado() -> str:
+    """Reporta estado del corpus JPL: disponible, tamaño, leyes y ordenanzas cargadas, FTS listo."""
+    if not _JPL_AVAILABLE or _jpl_db is None:
+        return "JPL no instalado. Ejecuta: python scripts/install_jpl.py"
+    jpl_root = _Path(__file__).resolve().parents[2] / "data" / "jpl"
+    has_zst = (jpl_root / "corpus.db.zlib").exists()
+    has_db = (jpl_root / "corpus.db").exists()
+    alt_zst = _Path(__file__).resolve().parents[3] / "K-LegalJPL" / "corpus.db.zlib"
+    alt_db = _Path(__file__).resolve().parents[3] / "K-LegalJPL" / "corpus.db"
+    lines = ["JPL — ESTADO del corpus:", ""]
+    lines.append(f"• data/jpl/corpus.db.zlib: {'✅ ' + str((jpl_root / 'corpus.db.zlib').stat().st_size/1024/1024)[:4] + ' MB' if has_zst else '❌ no existe'}")
+    lines.append(f"• data/jpl/corpus.db: {'✅ ' + str((jpl_root / 'corpus.db').stat().st_size/1024/1024)[:4] + ' MB' if has_db else '❌ no existe (se genera al primer uso)'}")
+    lines.append(f"• K-LegalJPL sibling: {'✅ disponible' if alt_zst.exists() or alt_db.exists() else '❌ no clonado'}")
+    if not (has_zst or has_db or alt_zst.exists() or alt_db.exists()):
+        lines.append("")
+        lines.append("Instala JPL con: python scripts/install_jpl.py")
+        lines.append("→ requiere acceso al repo privado K-LegalJPL (token GitHub).")
+        return "\n".join(lines)
+    # Intentar contar
+    try:
+        _jpl_db._ensure_db()  # type: ignore
+        leyes = _jpl_db.listar_leyes()  # type: ignore
+        ordenanzas = _jpl_db.listar_ordenanzas(None)  # type: ignore
+        total_ord = sum(r.get("ordenanzas",0) for r in ordenanzas) if ordenanzas and "ordenanzas" in ordenanzas[0] else len(ordenanzas)
+        lines.append(f"• Leyes en corpus: {len(leyes)} (ej. 18.287, 18.290, 19.925, ...)")
+        lines.append(f"• Ordenanzas: {total_ord} en {len(ordenanzas) if ordenanzas else 0} comunas")
+        # check FTS
+        import sqlite3
+        con = _jpl_db._db_conn()  # type: ignore
+        cur = con.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE name LIKE '%_fts'")
+        fts = [r[0] for r in cur.fetchall()]
+        con.close()
+        lines.append(f"• Índices FTS: {', '.join(fts) if fts else '❌ no construidos (se crean al buscar)'}")
+        lines.append("")
+        lines.append("JPL listo — tools disponibles: jpl_buscar_ley, jpl_buscar_articulo, jpl_buscar_texto, jpl_buscar_ordenanza, jpl_generar_documento, ...")
+    except Exception as e:
+        lines.append(f"• Error verificando corpus: {e}")
+    return "\n".join(lines)
 
 
 @mcp.tool()
@@ -929,15 +1216,19 @@ def buscar_datos_gob(query: str, limite: int = 5) -> str:
 
 @mcp.tool()
 def buscar_todo(query: str, limite: int = 8) -> str:
-    """Búsqueda multi-fuente PARALELO real: normas + CGR + jurisprudencia + SciELO."""
+    """Búsqueda multi-fuente PARALELO real: normas + CGR + jurisprudencia + SciELO + JPL (si está instalado)."""
     query = query.strip()
     if not query:
         return "Error: consulta vacía."
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
+    # Detectar JPL para incluirlo en paralelo si está disponible
+    _jpl_ok, _ = _jpl_check()
+    max_w = 5 if _jpl_ok else 4
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_w) as ex:
         f_normas = ex.submit(buscar_normas, query, limite)
         f_cgr = ex.submit(buscar_dictamenes, query, limite)
         f_juris = ex.submit(buscar_jurisprudencia, query, limite)
         f_scielo = ex.submit(buscar_scielo, query, 3)
+        f_jpl = ex.submit(jpl_buscar_texto, query, 4) if _jpl_ok else None
         try:
             r_normas = f_normas.result(timeout=60)
         except Exception as e:
@@ -954,6 +1245,12 @@ def buscar_todo(query: str, limite: int = 8) -> str:
             r_scielo = f_scielo.result(timeout=30)
         except Exception as e:
             r_scielo = f"Error SciELO: {e}"
+        r_jpl = None
+        if f_jpl:
+            try:
+                r_jpl = f_jpl.result(timeout=30)
+            except Exception as e:
+                r_jpl = f"Error JPL: {e}"
     partes: list[str] = [f"# Búsqueda multi-fuente (paralelo) para '{query}'\n"]
     partes.append("## 1. Legislación")
     partes.append(r_normas)
@@ -963,9 +1260,12 @@ def buscar_todo(query: str, limite: int = 8) -> str:
     partes.append(r_juris)
     partes.append("\n## 4. Doctrina SciELO")
     partes.append(r_scielo)
+    if r_jpl is not None:
+        partes.append("\n## 5. JPL (corpus local: leyes + ordenanzas 344 comunas + manuales)")
+        partes.append(r_jpl)
     body = _db.search_textos(query, limit=3)
     if body:
-        partes.append("\n## 5. Cuerpo de normas ya cacheadas")
+        partes.append("\n## 6. Cuerpo de normas ya cacheadas")
         for h in body:
             partes.append(f"• id {h['leychile_id']}: {h['preview'][:150]}...")
     partes.append("\n---\n🔗 Links oficiales:")
