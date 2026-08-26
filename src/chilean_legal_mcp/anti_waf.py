@@ -130,22 +130,25 @@ def _guardar_cookies(dominio: str, cookies: dict) -> None:
         pass
 
 
-def _extraer_cookies_playwright(url: str, dominio: str, *, esperar: int = 3) -> dict:
-    """Usa Playwright para resolver challenge JS y obtener cookies."""
+async def _extraer_cookies_playwright(url: str, dominio: str, *, esperar: int = 3) -> dict:
+    """Usa Playwright async para resolver challenge JS y obtener cookies (no bloquea event loop)."""
     cookies = {}
+    if not PLAYWRIGHT_AVAILABLE:
+        return cookies
     try:
-        from playwright.sync_api import sync_playwright
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context(
+        from playwright.async_api import async_playwright
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(
                 user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
                 locale="es-CL",
             )
-            page = context.new_page()
-            page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            page.wait_for_timeout(esperar * 1000)
-            cookies = {c["name"]: c["value"] for c in context.cookies() if c.get("domain") in (dominio, f".{dominio}")}
-            browser.close()
+            page = await context.new_page()
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            await page.wait_for_timeout(esperar * 1000)
+            all_cookies = await context.cookies()
+            cookies = {c["name"]: c["value"] for c in all_cookies if c.get("domain") in (dominio, f".{dominio}")}
+            await browser.close()
     except Exception:
         pass
     return cookies
@@ -199,8 +202,13 @@ def httpx_con_fallback(
             return resp_cookies
         return resp
 
-    # 3. Fallback: Playwright
-    cookies_pw = _extraer_cookies_playwright(url, dominio)
+    # 3. Fallback: Playwright async (no bloquea event loop)
+    cookies_pw = {}
+    if PLAYWRIGHT_AVAILABLE:
+        try:
+            cookies_pw = asyncio.run(_extraer_cookies_playwright(url, dominio, esperar=3))
+        except RuntimeError:
+            pass
     if cookies_pw:
         _guardar_cookies(dominio, cookies_pw)
         headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies_pw.items())
@@ -443,5 +451,26 @@ async def fetch_cgr(url: str, verbose: bool = False) -> str:
 
 # Función sync wrapper para compatibilidad
 def fetch_cgr_sync(url: str, verbose: bool = False) -> str:
-    """Wrapper sync para uso en código no-async."""
-    return asyncio.run(fetch_cgr(url, verbose))
+    """Wrapper sync para uso en código no-async.
+
+    Acepta ser llamado desde fuera de un event loop (usa asyncio.run) o desde
+    dentro de uno (requiere nest_asyncio instalado para correr el coroutine
+    en el loop actual sin bloquearlo).
+    """
+    try:
+        return asyncio.run(fetch_cgr(url, verbose))
+    except RuntimeError as e:
+        msg = str(e).lower()
+        if "cannot be called from" in msg or "no running" in msg:
+            try:
+                import nest_asyncio  # type: ignore
+                nest_asyncio.apply()
+                loop = asyncio.get_event_loop()
+                return loop.run_until_complete(fetch_cgr(url, verbose))
+            except ImportError:
+                raise RuntimeError(
+                    "fetch_cgr_sync llamado dentro de un event loop activo "
+                    "sin nest_asyncio instalado. "
+                    "Solución: pip install nest_asyncio"
+                ) from e
+        raise

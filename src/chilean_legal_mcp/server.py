@@ -763,10 +763,12 @@ def jpl_estado() -> str:
         # check FTS
         import sqlite3
         con = _jpl_db._db_conn()  # type: ignore
-        cur = con.cursor()
-        cur.execute("SELECT name FROM sqlite_master WHERE name LIKE '%_fts'")
-        fts = [r[0] for r in cur.fetchall()]
-        con.close()
+        try:
+            cur = con.cursor()
+            cur.execute("SELECT name FROM sqlite_master WHERE name LIKE '%_fts'")
+            fts = [r[0] for r in cur.fetchall()]
+        finally:
+            con.close()
         lines.append(f"• Índices FTS: {', '.join(fts) if fts else '❌ no construidos (se crean al buscar)'}")
         lines.append("")
         lines.append("JPL listo — tools disponibles: jpl_buscar_ley, jpl_buscar_articulo, jpl_buscar_texto, jpl_buscar_ordenanza, jpl_generar_documento, ...")

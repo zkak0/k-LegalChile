@@ -38,7 +38,7 @@ def _parse_results(text: str, limite: int) -> list[dict]:
 
     # Dictámenes aparecen como enlaces a documentos Domino: .../0/<UNID>?OpenDocument
     for href, inner in re.findall(r'<a[^>]+href="([^"]*OpenDocument[^"]*)"[^>]*>(.*?)</a>', text, re.I | re.S):
-        num_raw = html.unescape(re.sub(r"<[^>]+>", "", inner)).strip()
+        num_raw = html_lib.unescape(re.sub(r"<[^>]+>", "", inner)).strip()
         # Validar que parezca número de dictamen
         if len(num_raw) < 4 or not re.search(r"\d", num_raw):
             continue
@@ -73,7 +73,7 @@ def buscar_cgr(query: str, limite: int = 10, timeout: float = 25.0) -> list[dict
     """Busca dictámenes CGR con fallback cascada anti-WAF.
     
     1. Intenta fetch_cgr_sync (cascada: curl_cffi → wafer → Camoufox)
-    2. Si falla, intenta URL GET simple
+    2. Si falla, intenta URL GET simple (más rápido, sin anti-WAF)
     3. Si falla, fallback a fuentes alternativas (BCN) via buscar_dictamenes
     """
     query = query.strip()
@@ -82,9 +82,8 @@ def buscar_cgr(query: str, limite: int = 10, timeout: float = 25.0) -> list[dict
     
     url = _build_search_url(query, limite)
     
-    # Intento 1: CGRFetcher con cascada anti-WAF
+    # Intento 1: CGRFetcher con cascada anti-WAF (~10-15s, incluye cascada)
     try:
-        from .anti_waf import fetch_cgr_sync
         html_content = fetch_cgr_sync(url, verbose=False)
         resultados = _parse_results(html_content, limite)
         if resultados:
@@ -92,7 +91,7 @@ def buscar_cgr(query: str, limite: int = 10, timeout: float = 25.0) -> list[dict
     except Exception:
         pass
     
-    # Intento 2: GET simple con httpx (fallback legacy)
+    # Intento 2: GET simple con httpx (más rápido, headers CGR conocidos)
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -101,9 +100,8 @@ def buscar_cgr(query: str, limite: int = 10, timeout: float = 25.0) -> list[dict
             "Referer": "https://www.contraloria.cl/appinf/LegisJuri/DictamenesGeneralesMunicipales.nsf/FormConsultaWeb2k?OpenForm",
             "Cookie": "JURIS=OK",
         }
-        url_simple = _build_search_url(query, limite)
         with httpx.Client(headers=headers, follow_redirects=True, timeout=timeout) as c:
-            r = c.get(url_simple, headers=headers)
+            r = c.get(url, headers=headers)
             r.raise_for_status()
             resultados = _parse_results(r.text, limite)
             if resultados:

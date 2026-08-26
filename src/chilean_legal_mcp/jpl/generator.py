@@ -57,7 +57,7 @@ _FUENTES_CANONICAS: set[tuple[str, str]] = {
 
 def _get_con() -> sqlite3.Connection | None:
     try:
-        from leyes_db import _db_conn  # type: ignore[attr-defined]
+        from .db import _db_conn  # type: ignore[attr-defined]
         return _db_conn()
     except Exception:
         return None
