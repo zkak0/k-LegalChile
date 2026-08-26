@@ -13,6 +13,12 @@ dependencies = [
 [project.optional-dependencies]
 semantic = ["sentence-transformers>=3.0", "numpy"]
 pdf = ["weasyprint>=69.0"]
+anti-bot = [
+    "wafer-py>=0.3",
+    "curl_cffi>=0.7",
+    "camoufox>=0.5",
+    "wafw00f>=2.2",
+]
 
 [build-system]
 requires = ["setuptools>=68"]
