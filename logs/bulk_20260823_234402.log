@@ -1,0 +1,40 @@
+Ingesta masiva de normas chilenas...
+Bulk por año: 1990 → 2026
+  año 1990 offset 1000 nuevas=897 total_db=1626
+  año 1991 offset 1000 nuevas=1802 total_db=2531
+  año 1992 offset 1000 nuevas=2708 total_db=3437
+  año 1993 offset 1000 nuevas=3636 total_db=4365
+  año 1994 offset 1000 nuevas=4537 total_db=5266
+  año 1995 offset 1000 nuevas=5444 total_db=6173
+  año 1996 offset 1000 nuevas=6345 total_db=7074
+  año 1997 offset 1000 nuevas=7258 total_db=7987
+  año 1998 offset 1000 nuevas=8145 total_db=8874
+  año 1999 offset 1000 nuevas=9045 total_db=9774
+  año 2000 offset 1000 nuevas=9969 total_db=10698
+  año 2001 offset 1000 nuevas=10857 total_db=11586
+  año 2002 offset 1000 nuevas=11762 total_db=12491
+  año 2003 offset 1000 nuevas=12643 total_db=13372
+  año 2004 offset 1000 nuevas=13517 total_db=14246
+  año 2005 offset 1000 nuevas=14391 total_db=15120
+  año 2006 offset 1000 nuevas=15237 total_db=15966
+  año 2007 offset 1000 nuevas=16059 total_db=16788
+  año 2008 offset 1000 nuevas=16827 total_db=17556
+  año 2009 offset 1000 nuevas=17594 total_db=18323
+  año 2010 offset 1000 nuevas=18431 total_db=19160
+  año 2011 offset 1000 nuevas=19156 total_db=19885
+  año 2012 offset 1000 nuevas=19750 total_db=20479
+  año 2013 offset 1000 nuevas=20377 total_db=21106
+  año 2014 offset 1000 nuevas=21134 total_db=21863
+  año 2015 offset 1000 nuevas=22014 total_db=22743
+  año 2016 offset 1000 nuevas=22881 total_db=23610
+  año 2017 offset 1000 nuevas=23758 total_db=24487
+  año 2018 offset 1000 nuevas=24593 total_db=25322
+  año 2019 offset 1000 nuevas=25461 total_db=26190
+  año 2020 offset 1000 nuevas=26368 total_db=27097
+  año 2021 offset 1000 nuevas=27276 total_db=28005
+  año 2022 offset 1000 nuevas=28231 total_db=28960
+  año 2023 offset 1000 nuevas=28374 total_db=29103
+  año 2024 offset 1000 nuevas=28460 total_db=29189
+  año 2025 offset 1000 nuevas=28542 total_db=29271
+  año 2026 offset 1000 nuevas=28587 total_db=29316
+{'anios_cubiertos': 37, 'insertadas': 28587, 'total_db': 29316}
