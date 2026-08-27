@@ -53,9 +53,7 @@ try:
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
 
-# Cache de cookies por dominio
-_COOKIE_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "cookies"
-_COOKIE_DIR.mkdir(parents=True, exist_ok=True)
+# Cache de cookies por dominio (ruta lazy; mkdir se hace al primer uso)
 
 # Dominios que requieren anti-WAF
 _WAF_DOMAINS = {
@@ -86,26 +84,23 @@ def _detectar_bloqueo(resp: httpx.Response) -> bool:
     """Detecta si la respuesta es un WAF challenge en vez de contenido real."""
     if resp.status_code in (403, 503):
         return True
-    # Respuestas muy cortas con texto de bloqueo conocidos
+    # Si tiene patrón de bloqueo WAF explícito (incluso en texto largo)
     texto = resp.text or ""
     if len(texto) < 600 and any(re.search(p, texto, re.I) for p in _BLOCK_PATTERNS):
         return True
-    # Si devuelve texto pero ningún link href de dominio chileno conocido
-    if len(texto) < 2000:
-        chile_domains = [".gob.cl", ".cl", "bcn.cl", "pjud.cl", "tribunalconstitucional.cl",
-                         "tesoreria.cl", "tta.cl", "suseso.cl", "sii.cl", "inapi.cl",
-                         "diariooficial.interior.gob.cl", "contraloria.cl", "snifa.sma.gob.cl",
-                         "boletinconcursal.cl", "superir.gob.cl", "portalchile.org"]
-        has_valid_link = any(d in texto for d in chile_domains)
-        if not has_valid_link:
-            return True
     return False
+
+
+def _cookie_dir() -> Path:
+    _COOKIE_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "cookies"
+    _COOKIE_DIR.mkdir(parents=True, exist_ok=True)
+    return _COOKIE_DIR
 
 
 def _cookie_path(dominio: str) -> Path:
     """Ruta del archivo de cookies para un dominio."""
     safe = re.sub(r"[^a-z0-9]", "_", dominio.lower())
-    return _COOKIE_DIR / f"{safe}_cookies.json"
+    return _cookie_dir() / f"{safe}_cookies.json"
 
 
 def _cargar_cookies(dominio: str) -> dict:
@@ -307,8 +302,6 @@ class CGRFetcher:
             "pardon our interruption",
             "access to this page has been denied",
         ]
-        if len(text) < 500:
-            return True
         return any(indicator in text_lower for indicator in blocked_indicators)
     
     async def _try_curl_cffi(self, url: str) -> str | None:
@@ -465,8 +458,7 @@ def fetch_cgr_sync(url: str, verbose: bool = False) -> str:
             try:
                 import nest_asyncio  # type: ignore
                 nest_asyncio.apply()
-                loop = asyncio.get_event_loop()
-                return loop.run_until_complete(fetch_cgr(url, verbose))
+                return asyncio.run(fetch_cgr(url, verbose))
             except ImportError:
                 raise RuntimeError(
                     "fetch_cgr_sync llamado dentro de un event loop activo "
