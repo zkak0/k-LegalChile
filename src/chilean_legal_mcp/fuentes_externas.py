@@ -503,7 +503,9 @@ def buscar_cplt(query: str, limite: int = 5) -> list[dict]:
 
     # 2. Fallback Playwright (resuelve challenge Imperva y guarda cookies)
     try:
-        cookies_pw = _extraer_cookies_playwright(url_buscar, "jurisprudencia.cplt.cl", esperar=6)
+        import asyncio
+        cookies_pw = asyncio.run(
+            _extraer_cookies_playwright(url_buscar, "jurisprudencia.cplt.cl", esperar=6))
         if cookies_pw:
             _guardar_cookies("jurisprudencia.cplt.cl", cookies_pw)
             r2 = httpx.get(url_buscar, timeout=20, headers=headers, follow_redirects=True,
