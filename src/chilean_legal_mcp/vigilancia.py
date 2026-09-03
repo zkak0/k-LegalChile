@@ -126,8 +126,11 @@ def eliminar_vigilancia(nombre: str) -> dict:
 # --- Fetchers por fuente: devuelven lista de dicts normalizados -------------
 
 def _fetch_cgr(query: str, limite: int) -> list[dict]:
-    from .contraloria import buscar_cgr
-    rows = buscar_cgr(query, limite=limite)
+    from .contraloria import buscar_cgr, CGRNoDisponible
+    try:
+        rows = buscar_cgr(query, limite=limite)
+    except CGRNoDisponible:
+        return []  # CGR no disponible: se reporta "sin novedades", nunca se simulan
     return [{"fuente": "cgr", "titulo": r.get("titulo", ""), "url": r.get("url", ""),
              "identificador": r.get("url", ""), "fecha_publicacion": None} for r in rows]
 

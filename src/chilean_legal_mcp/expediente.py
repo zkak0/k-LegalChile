@@ -47,6 +47,52 @@ def _extraer_pdf(ruta: Path) -> str:
     return "\n".join(paginas)
 
 
+def _ocr_disponible() -> str | None:
+    """Devuelve el motor OCR disponible ('ocrmypdf' o 'tesseract') o None."""
+    import shutil
+    if shutil.which("ocrmypdf"):
+        return "ocrmypdf"
+    if shutil.which("tesseract") and shutil.which("pdftoppm"):
+        return "tesseract"
+    return None
+
+
+def _ocr_pdf(ruta: Path, limite_paginas: int = 30) -> str | None:
+    """OCR de un PDF escaneado cuando hay herramienta local.
+
+    No instala nada ni envía el documento a ningún servicio: todo local.
+    Devuelve None si no hay motor OCR o si el intento falla (honestidad).
+    """
+    motor = _ocr_disponible()
+    if not motor:
+        return None
+    import subprocess
+    import tempfile
+    try:
+        if motor == "ocrmypdf":
+            with tempfile.TemporaryDirectory() as tmp:
+                salida = Path(tmp) / "ocr.pdf"
+                subprocess.run(
+                    ["ocrmypdf", "--skip-text", "-l", "spa",
+                     "--pages", f"1-{limite_paginas}", str(ruta), str(salida)],
+                    check=True, capture_output=True, timeout=180)
+                return _extraer_pdf(salida)
+        # tesseract + pdftoppm
+        with tempfile.TemporaryDirectory() as tmp:
+            subprocess.run(["pdftoppm", "-l", str(limite_paginas), "-png",
+                            str(ruta), str(Path(tmp) / "pag")],
+                           check=True, capture_output=True, timeout=180)
+            partes = []
+            for img in sorted(Path(tmp).glob("pag-*.png")):
+                r = subprocess.run(["tesseract", str(img), "stdout", "-l", "spa"],
+                                   capture_output=True, timeout=120)
+                if r.returncode == 0:
+                    partes.append(r.stdout.decode("utf-8", "replace"))
+            return "\n".join(partes) or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _extraer_docx(ruta: Path) -> str:
     import docx  # python-docx
     d = docx.Document(str(ruta))
@@ -101,9 +147,24 @@ def indexar_carpeta(nombre: str, carpeta: str, reemplazar: bool = True) -> dict:
     for archivo in archivos:
         texto, tipo = extraer_texto(archivo)
         if tipo == "error" or not texto.strip():
-            errores.append({"archivo": archivo.name, "problema": "sin texto extraíble"
-                            if tipo != "error" else texto[:120]})
-            continue
+            # Segunda oportunidad honesta: OCR local si hay motor instalado
+            if tipo != "error" and archivo.suffix.lower() == ".pdf":
+                ocr = _ocr_pdf(archivo)
+                if ocr and ocr.strip():
+                    texto, tipo = ocr[:MAX_CHARS_DOC], "pdf-ocr"
+            if tipo == "error" or not texto.strip():
+                if tipo == "error":
+                    problema = texto[:120]
+                elif archivo.suffix.lower() == ".pdf":
+                    problema = (
+                        "sin texto extraíble (documento escaneado). Instale OCR local "
+                        "para intentar leerlo: brew install ocrmypdf (o tesseract + poppler)"
+                        if _ocr_disponible() is None else
+                        "sin texto extraíble tras intento de OCR")
+                else:
+                    problema = "sin texto extraíble"
+                errores.append({"archivo": archivo.name, "problema": problema})
+                continue
         db._conn.execute(
             "INSERT INTO expediente_docs (expediente_id, ruta, titulo, tipo, texto) "
             "VALUES (?,?,?,?,?)",
@@ -297,7 +358,358 @@ def partes(nombre: str) -> dict:
                      "capitalización; verifique manualmente contra los documentos.")}
 
 
-# --- Formato narrativo -----------------------------------------------------------
+# --- Citas normativas (conexión documentos locales ↔ legislación nacional) ---------
+
+def _buscar_norma_local(referente: str) -> dict | None:
+    """Busca el referente normativo ('Código Civil', 'Ley 19.966') en las normas
+    nacionales indexadas localmente. Devuelve la mejor coincidencia o None."""
+    db = get_db()
+    m = re.search(r"(?:Ley|ley)\s+(\d{1,3}(?:\.\d{3})+|\d+)", referente)
+    if m:
+        digitos = m.group(1).replace(".", "")
+        row = db._conn.execute(
+            "SELECT titulo, numero, leychile_id FROM normas "
+            "WHERE REPLACE(numero,'.','') = ? OR numero = ? LIMIT 1",
+            (digitos, m.group(1))).fetchone()
+        if row:
+            return {"titulo": row["titulo"], "numero": row["numero"],
+                    "leychile_id": row["leychile_id"]}
+        row = db._conn.execute(
+            "SELECT titulo, numero, leychile_id FROM normas WHERE numero LIKE ? LIMIT 1",
+            (f"%{digitos}%",)).fetchone()
+        if row:
+            return {"titulo": row["titulo"], "numero": row["numero"],
+                    "leychile_id": row["leychile_id"]}
+        return None
+    # por nombre del cuerpo legal (sin tildes, LIKE plano)
+    plano = "".join(c for c in unicodedata.normalize("NFD", referente)
+                    if unicodedata.category(c) != "Mn").upper()
+    for row in db._conn.execute(
+            "SELECT titulo, numero, leychile_id FROM normas WHERE UPPER(titulo) LIKE ? LIMIT 5",
+            (f"%{plano}%",)).fetchall():
+        return {"titulo": row["titulo"], "numero": row["numero"],
+                "leychile_id": row["leychile_id"]}
+    return None
+
+
+def citas_normativas(nombre: str, limite: int = 50) -> dict:
+    """Extrae de los documentos del expediente las citas a la legislación nacional
+    (artículo / inciso / cuerpo legal), con el documento y el contexto donde
+    aparecen, y verifica cada norma invocada contra la base nacional local."""
+    from .citas import extraer_citas
+    db = get_db()
+    row = db._conn.execute("SELECT id FROM expedientes WHERE nombre=?", (nombre.strip(),)).fetchone()
+    if not row:
+        return {"ok": False, "error": f"No existe expediente '{nombre}'."}
+    docs = db._conn.execute(
+        "SELECT titulo, texto FROM expediente_docs WHERE expediente_id=?",
+        (row["id"],)).fetchall()
+
+    citas: list[dict] = []
+    for d in docs:
+        texto = _normalizar(d["texto"])
+        plano = re.sub(r"\s+", " ", texto)
+        for c in extraer_citas(plano):
+            ini = max(0, c["posicion"] - 110)
+            fin = min(len(plano), c["posicion"] + len(c["literal"]) + 110)
+            citas.append({
+                "documento": d["titulo"],
+                "tipo": c["tipo"],
+                "referente": c.get("cuerpo")
+                    or f"{c.get('clase','').strip().capitalize()} {c.get('numero','')}".strip(),
+                "articulos": c["articulos"],
+                "inciso": c["inciso"],
+                "literal": c["literal"],
+                "contexto": plano[ini:fin].strip(),
+            })
+    citas = citas[:max(1, min(limite, 200))]
+
+    # Verificación contra la base nacional local (una vez por referente)
+    por_referente: dict[str, list[dict]] = {}
+    for c in citas:
+        por_referente.setdefault(c["referente"], []).append(c)
+    normas_invocadas = []
+    for referente, grupo in por_referente.items():
+        hall = _buscar_norma_local(referente)
+        arts = sorted({a for c in grupo for a in c["articulos"]},
+                      key=lambda a: (len(a), a))
+        normas_invocadas.append({
+            "referente": referente,
+            "veces_citada": len(grupo),
+            "articulos_citados": arts,
+            "verificacion": ({
+                "estado": "verificada_local",
+                "titulo_oficial": hall["titulo"],
+                "numero": hall["numero"],
+                "leychile_id": hall["leychile_id"],
+                "enlace": f"https://www.bcn.cl/leychile/navegar?idNorma={hall['leychile_id']}",
+            } if hall else {
+                "estado": "por_verificar",
+                "detalle": ("No consta en la base nacional local; confirme con "
+                            "buscar_normas / obtener_texto_norma antes de citar en juicio."),
+            }),
+        })
+
+    return {"ok": True, "expediente": nombre, "total_citas": len(citas),
+            "citas": citas, "normas_invocadas": normas_invocadas,
+            "nota": ("Las citas se detectaron por patrón terminológico. 'verificada_local' "
+                     "significa que el cuerpo legal consta en la base nacional; el artículo e "
+                     "inciso citados deben contrastarse con el texto oficial (obtener_texto_norma / "
+                     "obtener_articulo_texto) antes de invocarlas ante el tribunal.")}
+
+
+def formatear_citas(res: dict) -> str:
+    if not res.get("ok"):
+        return f"ERROR: {res.get('error', 'desconocido')}"
+    lineas = [
+        f"CITAS NORMATIVAS DEL EXPEDIENTE — '{res['expediente']}'",
+        f"Atendido el examen de los documentos indexados, se advierten "
+        f"{res['total_citas']} cita(s) a la legislación nacional.",
+        "",
+    ]
+    if not res["citas"]:
+        lineas.append("No se detectaron citas normativas ('artículo … del Código …', "
+                      "'Ley N° …', 'Decreto …'). Esto no asegura su inexistencia: "
+                      "revise los documentos manualmente.")
+        return "\n".join(lineas)
+
+    lineas.append("I. NORMAS INVOCADAS (estatus de verificación local)")
+    lineas.append("")
+    for n in sorted(res["normas_invocadas"], key=lambda x: -x["veces_citada"]):
+        ver = n["verificacion"]
+        sello = "[VERIFICADA EN BASE LOCAL]" if ver["estado"] == "verificada_local" else "[POR VERIFICAR]"
+        lineas.append(f"• {n['referente']} {sello} — citada {n['veces_citada']} vez(ces)")
+        if n["articulos_citados"]:
+            lineas.append(f"  Artículos citados: {', '.join(n['articulos_citados'])}")
+        if ver["estado"] == "verificada_local":
+            lineas.append(f"  Título oficial: {ver['titulo_oficial']} (N° {ver['numero']})")
+            lineas.append(f"  Fuente: {ver['enlace']}")
+        else:
+            lineas.append(f"  {ver['detalle']}")
+        lineas.append("")
+    lineas.append("II. DETALLE DE LAS CITAS CON SU UBICACIÓN EN EL EXPEDIENTE")
+    lineas.append("")
+    for i, c in enumerate(res["citas"], 1):
+        detalle = c["literal"]
+        if c["inciso"]:
+            detalle += f" [inciso {c['inciso']}]"
+        lineas.append(f"{i}. {detalle}")
+        lineas.append(f"   Documento: «{c['documento']}»")
+        lineas.append(f"   Contexto: \"…{c['contexto']}…\"")
+        lineas.append("")
+    lineas.append("NOTA: " + res["nota"])
+    return "\n".join(lineas)
+
+
+def vigencia_citas(nombre: str) -> dict:
+    """Estado de vigencia de las normas invocadas por el expediente.
+
+    Para cada norma con sello 'verificada_local' consulta estado_vigencia
+    (con caché SQLite de 7 días); las 'por_verificar' se reportan sin romper.
+    Añade la advertencia intertemporal obligatoria."""
+    base = citas_normativas(nombre)
+    if not base.get("ok"):
+        return base
+    from . import vigencia as _vig  # lazy: permite tests sin red y evita import circular
+    items = []
+    for n in base["normas_invocadas"]:
+        ver = n["verificacion"]
+        if ver.get("estado") != "verificada_local" or not ver.get("leychile_id"):
+            items.append({**n, "vigencia": {
+                "estado": "no_verificable",
+                "detalle": ("La identidad de la norma no consta en la base local "
+                            "[POR VERIFICAR]; primero confirme la norma y luego su vigencia."),
+            }})
+            continue
+        try:
+            est = _vig.estado_vigencia(ver["leychile_id"])
+        except Exception as exc:  # noqa: BLE001
+            est = {"estado": "error", "detalle": f"No fue posible consultar la vigencia: {exc}"}
+        items.append({**n, "vigencia": est})
+    return {
+        "ok": True, "expediente": nombre, "total_normas_invocadas": len(items),
+        "vigencias": items,
+        "nota": ("La vigencia se consultó contra la fuente oficial a la fecha de hoy. "
+                 "Si el expediente invoca una norma aplicada a hechos antiguos, recuerde el "
+                 "principio de intertemporalidad: el texto aplicable es el vigente al tiempo "
+                 "de los hechos o de su ocurrencia, no necesariamente el actual. Contraste con "
+                 "el 'historial de la norma' antes de fundamentar."),
+    }
+
+
+def formatear_vigencias(res: dict) -> str:
+    if not res.get("ok"):
+        return f"ERROR: {res.get('error', 'desconocido')}"
+    lineas = [
+        f"VIGENCIA DE LAS NORMAS INVOCADAS — expediente '{res['expediente']}'",
+        f"Atendido lo anterior, se verificó el estado de vigencia de "
+        f"{res['total_normas_invocadas']} norma(s) citada(s).",
+        "",
+    ]
+    for n in res["vigencias"]:
+        vig = n.get("vigencia", {})
+        estado = vig.get("estado", "DESCONOCIDO")
+        sello = {
+            "VIGENTE": "[VIGENTE]",
+            "DEROGADA": "[⚠ DEROGADA]",
+            "REFUNDIDA": "[⚠ REFUNDIDA]",
+            "no_verificable": "[SIN IDENTIDAD VERIFICADA]",
+        }.get(estado, f"[{estado}]")
+        lineas.append(f"• {n['referente']} {sello} — {n['veces_citada']} cita(s)")
+        if n["articulos_citados"]:
+            lineas.append(f"  Artículos citados: {', '.join(n['articulos_citados'])}")
+        if vig.get("derogada_por"):
+            lineas.append(f"  Derogada por: {vig['derogada_por']}")
+        if vig.get("refundida_por"):
+            lineas.append(f"  Refundida por: {vig['refundida_por']}")
+        if vig.get("ultima_modificacion"):
+            lineas.append(f"  Última modificación: {vig['ultima_modificacion']}"
+                          + (f" ({vig['modificada_por']})" if vig.get("modificada_por") else ""))
+        if vig.get("url_oficial"):
+            lineas.append(f"  Fuente oficial: {vig['url_oficial']}")
+        if vig.get("detalle"):
+            lineas.append(f"  {vig['detalle']}")
+        lineas.append("")
+    lineas.append("NOTA INTERTEMPORAL: " + res["nota"])
+    return "\n".join(lineas)
+
+
+# --- Plazos procesales detectados en el expediente -------------------------------
+
+_NUM_PALABRES = {
+    "primer": 1, "primero": 1, "segundo": 2, "tercer": 3, "tercero": 3,
+    "cuarto": 4, "quinto": 5, "sexto": 6, "séptimo": 7, "septimo": 7,
+    "octavo": 8, "noveno": 9, "décimo": 10, "decimo": 10,
+}
+
+_RE_PLAZO = re.compile(
+    r"\b(?:plazo|t[ée]rmino)\s+de\s+(?P<dias>\d+|" + "|".join(_NUM_PALABRES) + r")"
+    r"\s+d[íi]a(s)?"
+    r"(?:\s+(?P<tipo>h[áa]biles(?:\s+judiciales)?|corridos))?"
+    r"|\bdentro\s+de(?:l\s+)?(?P<dias2>\d+|" + "|".join(_NUM_PALABRES) + r")"
+    r"\s+d[íi]a(s)?"
+    r"(?:\s+(?P<tipo2>h[áa]biles(?:\s+judiciales)?|corridos))?",
+    re.IGNORECASE)
+
+_RE_NOTIFICACION = re.compile(
+    r"notificad[oa]\w*\s+(?:el\s+|el\s+d[íi]a\s+)?", re.IGNORECASE)
+
+
+def _dias_de_coincidencia(m: re.Match) -> tuple[int, str]:
+    """Número de días del match; entero o palabra ('sexto' → 6)."""
+    crudo = m.group("dias") or m.group("dias2") or ""
+    crudo = crudo.lower().strip()
+    return _NUM_PALABRES.get(crudo, int(crudo) if crudo.isdigit() else 0), crudo
+
+
+def _fecha_ancla(plano: str, posicion: int) -> str | None:
+    """Fecha de referencia del plazo: la del contexto cercano ANTERIOR a la cita
+    ('notificado el 10-08-2026'), o la fecha más próxima anterior en el documento."""
+    ventana = plano[max(0, posicion - 500):posicion]
+    fechas = [iso for iso, _ in _fechas_de_texto(ventana)]
+    return fechas[-1] if fechas else None
+
+
+def plazos_expediente(nombre: str) -> dict:
+    """Plazos procesales detectados en los documentos, computados y con estado
+    (vencido / vence en N días / sin fecha de referencia)."""
+    from .plazos import computar_plazo, parsear_fecha_cl  # lazy
+    from datetime import date as _date
+    hoy = _date.today()
+    db = get_db()
+    row = db._conn.execute("SELECT id FROM expedientes WHERE nombre=?", (nombre.strip(),)).fetchone()
+    if not row:
+        return {"ok": False, "error": f"No existe expediente '{nombre}'."}
+    docs = db._conn.execute(
+        "SELECT titulo, texto FROM expediente_docs WHERE expediente_id=?",
+        (row["id"],)).fetchall()
+
+    hallazgos = []
+    for d in docs:
+        plano = re.sub(r"\s+", " ", _normalizar(d["texto"]))
+        for m in _RE_PLAZO.finditer(plano):
+            dias, crudo = _dias_de_coincidencia(m)
+            if not dias:
+                continue
+            mencion = (m.group("tipo") or m.group("tipo2") or "").lower()
+            tipo = "corridos" if "corrido" in mencion else "habiles"
+            ini = max(0, m.start() - 120)
+            fin = min(len(plano), m.end() + 120)
+            fecha_ancla = _fecha_ancla(plano, m.start())
+            hallazgo = {
+                "documento": d["titulo"],
+                "literal": m.group(0).strip(),
+                "dias": dias,
+                "dias_dicho": crudo,
+                "tipo": tipo,
+                "contexto": plano[ini:fin].strip(),
+                "fecha_referencia": fecha_ancla,
+            }
+            if fecha_ancla:
+                base = parsear_fecha_cl(fecha_ancla)
+                if base:
+                    computo = computar_plazo(base, dias, tipo)
+                    venc = parsear_fecha_cl(computo["vencimiento"])
+                    restan = (venc - hoy).days if venc else None
+                    hallazgo.update({
+                        "vencimiento": computo["vencimiento"],
+                        "vencimiento_cl": computo["vencimiento_cl"],
+                        "dias_restantes": restan,
+                        "estado": ("vencido" if restan < 0 else
+                                   "vence hoy" if restan == 0 else
+                                   f"vence en {restan} día(s)"),
+                        "pasos": computo["pasos"],
+                    })
+                else:
+                    hallazgo["estado"] = "fecha de referencia no interpretable"
+            else:
+                hallazgo["estado"] = "sin fecha de referencia en el documento"
+            hallazgos.append(hallazgo)
+
+    return {
+        "ok": True, "expediente": nombre, "hoy": hoy.isoformat(),
+        "total_plazos": len(hallazgos), "plazos": hallazgos,
+        "nota": ("Los plazos se detectaron por patrón terminológico y se computaron con "
+                 "arts. 38/40 CPC y 66 COT. El estado respecto de hoy es informativo: un "
+                 "plazo judicial real puede estar interrumpido o suspendido por causales "
+                 "que este análisis no conoce (art. 50 CPC, feriado especial, rebeldía)."),
+    }
+
+
+def formatear_plazos_expediente(res: dict) -> str:
+    if not res.get("ok"):
+        return f"ERROR: {res.get('error', 'desconocido')}"
+    lineas = [
+        f"PLAZOS DETECTADOS EN EL EXPEDIENTE — '{res['expediente']}'",
+        f"Atendido el examen documental (hoy: {res['hoy']}), se advierten "
+        f"{res['total_plazos']} plazo(s) procesales mencionados.",
+        "",
+    ]
+    if not res["plazos"]:
+        lineas.append("No se detectaron fórmulas de plazo ('plazo de N días', 'dentro del "
+                      "sexto día'). Esto no asegura su inexistencia: revise los documentos.")
+        return "\n".join(lineas)
+    urgentes = [p for p in res["plazos"]
+                if isinstance(p.get("dias_restantes"), int) and p["dias_restantes"] <= 5]
+    for i, p in enumerate(res["plazos"], 1):
+        marca = " 🔴" if p in urgentes and "venc" not in p["estado"] else ""
+        lineas.append(f"{i}. \"{p['literal']}\" — {p['dias']} días {p['tipo']}{marca}")
+        lineas.append(f"   Documento: «{p['documento']}»")
+        lineas.append(f"   Contexto: \"…{p['contexto']}…\"")
+        if p.get("vencimiento_cl"):
+            lineas.append(f"   Referencia: {p['fecha_referencia']} → Vence: {p['vencimiento_cl']} "
+                          f"({p['estado']})")
+        else:
+            lineas.append(f"   Estado: {p['estado']}")
+        lineas.append("")
+    if urgentes:
+        lineas.append("ATENCIÓN: hay plazo(s) vencidos o a 5 días o menos del vencimiento.")
+        lineas.append("")
+    lineas.append("NOTA: " + res["nota"])
+    return "\n".join(lineas)
+
+
+
 
 def formatear_indexacion(res: dict) -> str:
     if not res.get("ok"):

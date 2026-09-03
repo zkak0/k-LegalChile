@@ -1,8 +1,9 @@
 """Servidor MCP de investigación legal chilena — mejor que Trifolia.
 
-Herramientas (77):
+Herramientas (82):
 - buscar_normas: legislación con filtros fecha/tipo/materia + paginación offset + FTS body + DD-MM-AAAA.
 - obtener_texto_norma: texto completo XML LeyChile con chunk/offset.
+- obtener_articulo_texto: artículo (e inciso) exacto, corte forense del texto oficial (ordinal º/°; art. 2 ≠ art. 20).
 - estado_vigencia: VIGENTE/DEROGADA/REFUNDIDA leyendo el encabezado legal oficial renderizado.
 - buscar_casos: casos reales parecidos extraídos de documentos oficiales (hechos/resolución).
 - guardar_memoria / consultar_memoria / historial_conversacion / registrar_interaccion / resumen_trabajo: memoria persistente del abogado (cerebro local, cache circular 500, retención 30 días).
@@ -20,6 +21,10 @@ Herramientas (77):
 - buscar_todo: búsqueda multi-fuente paralela real (ThreadPoolExecutor 6 workers).
 - vigilancia_crear / vigilancia_listar / vigilancia_ejecutar / vigilancia_historial / vigilancia_marcar_revisados / vigilancia_eliminar / vigilancia_pausar: monitor legal automático (condición en lenguaje natural + fuentes oficiales, dedupe e informe narrativo).
 - expediente_indexar / expediente_preguntar / expediente_timeline / expediente_partes / expediente_listar / expediente_eliminar: análisis de expedientes propios (carpeta PDF/DOCX/TXT → FTS5 local, respuestas con citas al documento, línea de tiempo y partes).
+- expediente_citas_legales: DERECHO INVOCADO del expediente — citas con precisión de artículo e inciso, ubicación en el expediente y verificación contra la base nacional local.
+- expediente_vigencia_citas: estado de vigencia (VIGENTE/DEROGADA/REFUNDIDA) de cada norma citada en el expediente, con advertencia intertemporal.
+- expediente_plazos: plazos procesales detectados en los documentos, computados (arts. 38/40 CPC, 66 COT) y estado frente a hoy.
+- computar_plazo_procesal: cómputo de plazos chilenos (desde notificación, hábiles/corridos, feriado judicial, prórroga vencimiento inhábil) con fundamentos.
 - analizar_consulta: informe jurídico estructurado I-V multi-fuente en un solo paso.
 - salud_fuentes: verifica conectividad de todos los endpoints oficiales chilenos.
 - sii_buscar_oficio / sii_buscar_circular / sii_buscar_resolucion / sii_buscar_fallo: SII oficial (www3/www4.sii.cl + tta.cl).
@@ -40,7 +45,7 @@ from datetime import datetime
 
 from mcp.server.fastmcp import FastMCP
 
-from .contraloria import buscar_cgr
+from .contraloria import buscar_cgr, CGRNoDisponible
 from .db import NormasDB
 from .exportar import exportar_docx, exportar_pdf
 from . import inapi as _inapi_mod
@@ -78,11 +83,23 @@ from .expediente import (
     partes as _exp_partes,
     listar_expedientes as _exp_listar,
     eliminar_expediente as _exp_eliminar,
+    citas_normativas as _exp_citas,
+    vigencia_citas as _exp_vigencia_citas,
+    plazos_expediente as _exp_plazos,
+    formatear_plazos_expediente as _exp_fmt_plazos,
     formatear_indexacion as _exp_fmt_index,
     formatear_respuesta as _exp_fmt_respuesta,
     formatear_timeline as _exp_fmt_timeline,
     formatear_partes as _exp_fmt_partes,
     formatear_listado as _exp_fmt_listado,
+    formatear_citas as _exp_fmt_citas,
+    formatear_vigencias as _exp_fmt_vigencias,
+)
+from .citas import extraer_articulo as _extraer_articulo
+from .plazos import (
+    computar_plazo as _computar_plazo,
+    parsear_fecha_cl as _parsear_fecha_cl,
+    formatear_plazo as _fmt_plazo,
 )
 from .narrativa import (
     analizar_sentencia_tc as _analizar_sentencia_tc,
@@ -287,7 +304,7 @@ def buscar_normas(query: str, limite: int = 10, offset: int = 0, fecha_desde: st
     salida.append("🔗 Links oficiales:")
     salida.append("• LeyChile: https://www.bcn.cl/leychile/navegar?idNorma=<id>")
     salida.append("• CGR: https://www.contraloria.cl/web/cgr/dictamenes-y-pronunciamientos")
-    salida.append("• PJUD: https://www.pjud.cl/portal-unificado-sentencias")
+    salida.append("• PJUD: https://juris.pjud.cl/busqueda/lista_buscadores")
     try:  # auto-registro en memoria (nunca rompe la búsqueda)
         _registrar_mensaje("consulta_auto", f"buscar_normas('{query}') → {len(resultados)} resultados",
                            herramientas="buscar_normas")
@@ -808,44 +825,50 @@ def obtener_texto_norma(identificador: str, offset: int = 0, chunk: int = 8000) 
         url = leychile_url(leychile_id)
         return f"No se pudo descargar el texto para id {leychile_id}. Ver fuente oficial: {url}\n🔗 https://www.bcn.cl/leychile/navegar?idNorma={leychile_id}"
     _db.save_texto(leychile_id, texto)
-    # Paginación
+    # Paginación: si el texto cabe en un chunk se devuelve entero; si no, por partes
+    # (los cuerpos precargados íntegros pueden tener más de 8000 chars).
     total = len(texto)
-    if offset or chunk != 8000:
+    if offset or chunk != 8000 or total > chunk:
         texto = texto[offset: offset + chunk]
         texto += f"\n\n---\nMostrando {offset}-{offset+len(texto)} de {total} chars. Usa offset={offset+chunk} para siguiente chunk."
     texto += "\n\n---\n🔗 Links oficiales:\n"
     texto += f"• Ver en LeyChile: https://www.bcn.cl/leychile/navegar?idNorma={leychile_id}\n"
     texto += "• CGR: https://www.contraloria.cl/web/cgr/dictamenes-y-pronunciamientos\n"
-    texto += "• PJUD: https://www.pjud.cl/portal-unificado-sentencias\n"
+    texto += "• PJUD: https://juris.pjud.cl/busqueda/lista_buscadores\n"
     return texto
 
 
 @mcp.tool()
 def buscar_dictamenes(query: str, limite: int = 10) -> str:
-    """Busca dictámenes de la Contraloría General de la República por texto libre."""
+    """Busca dictámenes de la Contraloría General de la República por texto libre.
+
+    Fuente: la CGR misma (contraloria.cl, en vivo). Caché local solo lo ya consultado.
+    Si la CGR no responde, se informa honestamente; no se cambia de fuente a escondidas.
+    """
     query = query.strip()
     if not query:
         return "Error: consulta vacía."
     local = _db.search_dictamenes(query, limit=limite)
-    cgr_rows = buscar_cgr(query, limite=limite)
+    cgr_estado = "en vivo"
+    try:
+        cgr_rows = buscar_cgr(query, limite=limite)
+    except CGRNoDisponible as exc:
+        cgr_rows = []
+        cgr_estado = f"CGR no disponible ({exc})"
     for r in cgr_rows:
         cid = f"cgr:{r['numero']}"
         _db.upsert_dictamen(cid, r["numero"], r["titulo"], None, r["url"])
         if not any(x["numero"] == r["numero"] for x in local):
             local.append({"numero": r["numero"], "titulo": r["titulo"], "fecha": None, "url": r["url"]})
     if not local:
-        try:
-            bcn_rows = _client().search_dictamenes(query, limit=limite)
-            for r in bcn_rows:
-                local.append({"numero": "", "titulo": r.get("titulo",""), "fecha": r.get("fecha"), "url": r.get("uri","")})
-        except Exception:
-            pass
-    if not local:
-        return (f"CONCLUSIÓN: No se encontraron dictámenes para '{query}' en CGR ni BCN.\n"
+        extra = "" if cgr_estado == "en vivo" else f"\nNOTA: la consulta en vivo falló: {cgr_estado}."
+        return (f"CONCLUSIÓN: No se encontraron dictámenes para '{query}' en la Contraloría.{extra}\n"
                 "Este vacío NO significa que el asunto no exista: prueba términos más amplios "
                 "o revisa directamente https://www.contraloria.cl/web/cgr/dictamenes-y-pronunciamientos")
     out = ["DICTÁMENES CONTRALORÍA GENERAL DE LA REPÚBLICA",
-           _narr_encabezado("CGR", query, len(local[:limite])), ""]
+           _narr_encabezado("CGR", query, len(local[:limite])),
+           f"(fuente: {'CGR en vivo, contraloria.cl' if cgr_rows else 'caché local de consultas previas'})",
+           ""]
     for r in local[:limite]:
         num = r.get("numero") or "s/n"
         out.append(f"• Dictamen {num} — {r.get('titulo','')}")
@@ -861,16 +884,29 @@ def buscar_dictamenes(query: str, limite: int = 10) -> str:
     out.append("🔗 Links oficiales:")
     out.append("• CGR: https://www.contraloria.cl/web/cgr/dictamenes-y-pronunciamientos")
     out.append("• LeyChile: https://www.bcn.cl/leychile/navegar?idNorma=<id>")
-    out.append("• PJUD: https://www.pjud.cl/portal-unificado-sentencias")
+    out.append("• PJUD: https://juris.pjud.cl/busqueda/lista_buscadores")
     return "\n".join(out)
 
 
 @mcp.tool()
-def buscar_jurisprudencia(query: str, limite: int = 10) -> str:
-    """Busca jurisprudencia chilena — fuentes públicas y legales. Ahora con fallback semántico y búsqueda real PJUD/TC/TDPI."""
+def buscar_jurisprudencia(query: str, limite: int = 10,
+                          buscador: str | None = None) -> str:
+    """Busca jurisprudencia chilena — fuentes públicas y legales. Búsqueda real
+    en el portal oficial PJUD (juris.pjud.cl: Corte Suprema por defecto; con
+    ``buscador`` se puede elegir 'corte_de_apelaciones', 'civiles', 'familia',
+    'penales', 'laborales', 'cobranza', 'compendio_extranjeria',
+    'lineas_jurisprudenciales' o 'salud_cs'), más BCN/TC/CGR."""
     query = query.strip()
     if not query:
         return "Error: consulta vacía."
+    # 0. PJUD (juris.pjud.cl) — fuente primaria en vivo
+    pjud_docs, pjud_total, pjud_msg = [], 0, ""
+    try:
+        from .pjud_juris import buscar_sentencias_pjud, PJUDNoDisponible
+        pjud_docs, pjud_total = buscar_sentencias_pjud(query, limite=limite,
+                                                       buscador=buscador)
+    except Exception as e:
+        pjud_msg = f"(PJUD en vivo no disponible: {type(e).__name__})"
     # 1. BCN filtrado
     try:
         rows = _client().search_by_title(query, limit=limite)
@@ -896,10 +932,24 @@ def buscar_jurisprudencia(query: str, limite: int = 10) -> str:
         from .fuentes_externas import buscar_tc as _tc
         tc_rows = _tc(query, limite=2)
         # Filtrar fallback genérico
-        tc_rows = [r for r in tc_rows if "Buscar '" not in r["titulo"]]
+        tc_rows = [r for r in tc_rows
+                   if len(r.get("titulo", "").strip()) > 15
+                   and "Buscar '" not in r.get("titulo", "")
+                   and "favicon" not in r.get("url", "")]
     except Exception:
         pass
     header = f"Jurisprudencia para '{query}' (fuentes públicas):\n"
+    if pjud_docs:
+        header += (f"**PJUD portal oficial ({pjud_total} sentencias encontradas, "
+                   f"se listan {len(pjud_docs)}):**\n")
+        for d in pjud_docs:
+            header += (f"\n• {d['tribunal']} {d['sala']} — Rol {d['rol']} ({d['fecha']})\n"
+                       f"  {d['caratulado'][:120]}\n"
+                       f"  {d['tipo_recurso']} — {d['resultado']}\n"
+                       f"  {d['texto'][:400].replace('<br/>',' ')}\n"
+                       f"  🔗 {d['url']}\n")
+    elif pjud_msg:
+        header += f"{pjud_msg}\n"
     if juris:
         header += f"({len(juris)} en BCN)\n\n"
         for r in juris[:limite]:
@@ -924,7 +974,7 @@ def buscar_jurisprudencia(query: str, limite: int = 10) -> str:
             pass
     header += (
         "\n🔗 Links oficiales:\n"
-        "• PJUD: https://www.pjud.cl/portal-unificado-sentencias\n"
+        "• PJUD: https://juris.pjud.cl/busqueda/lista_buscadores\n"
         "• TC: https://buscador.tcchile.cl/#/\n"
         "• CGR: https://www.contraloria.cl/web/cgr/dictamenes-y-pronunciamientos\n"
         "• LeyChile: https://www.bcn.cl/leychile/navegar?idNorma=<id>\n"
@@ -949,7 +999,7 @@ def buscar_doctrina(query: str, limite: int = 10) -> str:
             out.append(f"  URI: {r.get('uri','')}")
             out.append("")
         out.append("Fuente: BCN Articulo (bodies legislativos).")
-        out.append("🔗 https://www.bcn.cl/leychile/navegar?idNorma=<id> | https://www.pjud.cl/portal-unificado-sentencias")
+        out.append("🔗 https://www.bcn.cl/leychile/navegar?idNorma=<id> | https://juris.pjud.cl/busqueda/lista_buscadores")
         return "\n".join(out)
     return buscar_normas(query, limite=limite) + "\n\n[Doctrina fallback a normas — artículos sin resultados directos]"
 
@@ -1273,7 +1323,7 @@ def buscar_todo(query: str, limite: int = 8) -> str:
     partes.append("\n---\n🔗 Links oficiales:")
     partes.append("• LeyChile: https://www.bcn.cl/leychile/navegar?idNorma=<id>")
     partes.append("• CGR: https://www.contraloria.cl/web/cgr/dictamenes-y-pronunciamientos")
-    partes.append("• PJUD: https://www.pjud.cl/portal-unificado-sentencias")
+    partes.append("• PJUD: https://juris.pjud.cl/busqueda/lista_buscadores")
     partes.append("• SciELO: https://search.scielo.org/?q=<query>&lang=es")
     partes.append("• DT: https://www.dt.gob.cl/legislacion/1624/w3-channel.html")
     partes.append("• Diario Oficial: https://www.diariooficial.interior.gob.cl/buscador/solicitud/buscar?texto=<query>")
@@ -1387,7 +1437,7 @@ def analizar_consulta(consulta: str) -> str:
     secciones.append("\n---\n## Referencias y links oficiales\n")
     links = [
         "LeyChile: https://www.bcn.cl/leychile/navegar?idNorma=<id>",
-        "PJUD (jurisprudencia): https://www.pjud.cl/portal-unificado-sentencias",
+        "PJUD (jurisprudencia): https://juris.pjud.cl/busqueda/lista_buscadores",
         "TC: https://buscador.tcchile.cl/#/",
         "CGR (dictámenes): https://www.contraloria.cl/web/cgr/dictamenes-y-pronunciamientos",
         "SII: https://www.sii.cl",
@@ -1932,7 +1982,7 @@ def ayuda_acceso_abogado() -> str:
         "2. Contraloría — dictámenes:\n"
         "   https://www.contraloria.cl/web/cgr/dictamenes-y-pronunciamientos\n\n"
         "3. Poder Judicial — jurisprudencia:\n"
-        "   https://www.pjud.cl/portal-unificado-sentencias\n\n"
+        "   https://juris.pjud.cl/busqueda/lista_buscadores\n\n"
         "4. SciELO Chile — doctrina:\n"
         "   https://search.scielo.org/?q=derecho&lang=es\n\n"
         "5. Dirección del Trabajo:\n"
@@ -1984,6 +2034,73 @@ def expediente_eliminar(nombre: str) -> str:
     """Elimina un expediente indexado (los archivos originales NO se tocan)."""
     res = _exp_eliminar(nombre)
     return f"✅ Expediente '{nombre}' eliminado (archivos originales intactos)." if res["ok"] else f"ERROR: {res['error']}"
+
+
+@mcp.tool()
+def expediente_citas_legales(nombre: str, limite: int = 50) -> str:
+    """Extrae de los documentos del expediente todo el DERECHO INVOCADO: citas a cuerpos legales con precisión de artículo e inciso ('artículo 148, inciso primero, del Código Civil', 'art. 64 CPC', 'Ley N° 19.966'), indicando el documento y el contexto donde cada una aparece. Verifica cada norma contra la base nacional local: [VERIFICADA EN BASE LOCAL] o [POR VERIFICAR]."""
+    if limite < 1 or limite > 200:
+        limite = 50
+    return _exp_fmt_citas(_exp_citas(nombre, limite))
+
+
+@mcp.tool()
+def obtener_articulo_texto(identificador: str, articulo: str, inciso: str | None = None) -> str:
+    """Devuelve el texto literal de un artículo —y opcionalmente de un inciso— de una norma chilena, cortado con precisión forense del texto oficial (LeyChile). Distingue el ordinal 'º/°': pedir el artículo 2 no trae el 20 ni el 21. Usa la caché local; si la norma no está descargada, intenta bajarla de LeyChile. Ejemplo: obtener_articulo_texto(identificador='21643', articulo='2', inciso='1')"""
+    texto = obtener_texto_norma(identificador)
+    encabezado = f"Norma consultada: {identificador} — Artículo {articulo}"
+    if inciso:
+        encabezado += f", inciso {inciso}"
+    res = _extraer_articulo(texto, articulo, inciso)
+    if not res.get("ok"):
+        return (f"{encabezado}\n\nERROR: {res.get('error', 'artículo no encontrado')}\n"
+                "Compruebe que la norma se descargó íntegramente y cite de la fuente oficial: "
+                "https://www.bcn.cl/leychile/")
+    salida = [encabezado, ""]
+    if res.get("advertencia"):
+        salida.append(f"ADVERTENCIA: {res['advertencia']}")
+        salida.append("")
+    if inciso and res.get("texto_inciso"):
+        salida.append(f"Inciso {res.get('inciso', inciso)}:")
+        salida.append(res["texto_inciso"])
+    else:
+        salida.append(res["texto_articulo"])
+    if res.get("incisos") and not inciso:
+        salida.append("")
+        salida.append("Párrafos del artículo detectados:")
+        salida.extend(f"• inciso {i['inciso']}" for i in res["incisos"] if i.get("inciso"))
+    salida.append("")
+    salida.append("NOTA: extracto literal del texto oficial en caché/descargado; contraste con "
+                  "https://www.bcn.cl/leychile/ antes de citarlo en escrito al tribunal.")
+    return "\n".join(salida)
+
+
+@mcp.tool()
+def expediente_vigencia_citas(nombre: str) -> str:
+    """Verifica el estado de vigencia (VIGENTE / DEROGADA / REFUNDIDA) de cada norma citada en el expediente, con fecha de última modificación y advertencia intertemporal. Base: expediente_citas_legales + estado_vigencia (caché 7 días)."""
+    return _exp_fmt_vigencias(_exp_vigencia_citas(nombre))
+
+
+@mcp.tool()
+def expediente_plazos(nombre: str) -> str:
+    """Detecta plazos procesales en los documentos del expediente ('plazo de 15 días', 'dentro del sexto día'), los computa con arts. 38/40 CPC + feriado judicial, y reporta su estado contra hoy (vencido / vence en N días / sin fecha de referencia)."""
+    return _exp_fmt_plazos(_exp_plazos(nombre))
+
+
+@mcp.tool()
+def computar_plazo_procesal(fecha_notificacion: str, dias: int, tipo: str = "habiles") -> str:
+    """Computa un plazo procesal chileno desde la notificación: arts. 38/40 CPC, sábado inhábil (Ley 2.977) y feriado judicial 1-feb → primer hábil de marzo (art. 66 COT). Recibe la fecha DD-MM-AAAA (o "15 de enero de 2026"), N días y tipo 'habiles' o 'corridos'. Devuelve el vencimiento con la cadena de razonamiento y los fundamentos legales. Ejemplo: computar_plazo_procesal('15-01-2026', 10, 'habiles')"""
+    fecha = _parsear_fecha_cl(fecha_notificacion)
+    if fecha is None:
+        return (f"ERROR: no entendí la fecha '{fecha_notificacion}'. "
+                "Use DD-MM-AAAA, DD/MM/AAAA o '15 de enero de 2026'.")
+    if tipo not in ("habiles", "corridos"):
+        return "ERROR: tipo debe ser 'habiles' o 'corridos'."
+    try:
+        res = _computar_plazo(fecha, dias, tipo)
+    except ValueError as exc:
+        return f"ERROR: {exc}"
+    return _fmt_plazo(res)
 
 
 def main() -> None:

@@ -1,0 +1,25 @@
+name: tests
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Instalar el paquete
+        run: pip install -e .
+      - name: Ejecutar tests (offline; los tests nunca pegan a la red ni requieren corpus JPL)
+        run: python -m pytest tests -q
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"

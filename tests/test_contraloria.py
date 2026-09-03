@@ -7,36 +7,127 @@ import re
 import pytest
 
 
-# ─── _build_search_url ─────────────────────────────────────────────────────
+# ─── Flujo CGR: GET con la URL que usa el propio JavaScript del formulario ─
 
-class TestBuildSearchUrl:
-    def test_url_contiene_query_codificada(self):
-        from chilean_legal_mcp.contraloria import _build_search_url
-        url = _build_search_url("despido sin causa", limite=10)
-        assert "TextoLibre=despido+sin+causa" in url or "TextoLibre=despido%20sin%20causa" in url
+FORM_HTML = """<html><head><script>function realizaConsulta(){ /* formulario, no resultados */ }</script>
+<form action="..."><input name="TextoLibre"></form></head><body>form</body></html>"""
 
-    def test_url_contiene_limite(self):
-        from chilean_legal_mcp.contraloria import _build_search_url
-        url = _build_search_url("test", limite=5)
-        assert "dpp=5" in url
-        assert "porPagina=5" in url
+LEGACY_HTML = """<html><body>
+<table>
+<tr><td><a href="/appinf/LegisJuri/DictamenesGeneralesMunicipales.nsf/0/ABC123?OpenDocument">
+Dictamen N° 15.234 de 2024</a></td><td>Materia municipal - funcionarios publicos</td></tr>
+<tr><td><a href="/appinf/LegisJuri/DictamenesGeneralesMunicipales.nsf/0/DEF456?OpenDocument">
+Dictamen N° 18.567/2025</a></td><td>Contratos municipales - licitación pública</td></tr>
+</table></body></html>"""
 
-    def test_url_base_correcta(self):
-        from chilean_legal_mcp.contraloria import _build_search_url
-        url = _build_search_url("test", limite=10)
-        assert "contraloria.cl" in url
-        assert "FormConsultaWeb2k" in url
-        assert "OpenForm" in url
+# Marcado REAL capturado de contraloria.cl el 30-08-2026 (sistema "NVA")
+RESULTS_HTML = """<html><body>
+<div class="textoEncabezadoTabla">Resultados de la consulta: se ha encontrado 2.791 dictámenes</div>
+<table id="TablaConsultaWeb" class="textoTabla">
+<tr id="8386D4F16D6C42F584258E44006AF7E2" bgcolor="#7faed4">
+<td class="textoNumeracionRegistro" width="5%">1&nbsp;</td>
+<td class="textoContenidoTabla" height="20px" width="10%"> 28/07/2026</td>
+<td class="textoContenidoTabla" height="20px" width="10%">
+<a class="lkDictamen" href="javascript:void(0)"
+ onclick="registraVisitaDictamen('8386D4F16D6C42F584258E44006AF7E2'); muestraDictamenIframe('/LegisJuri/DictamenesGeneralesMunicipales.nsf/cgrDetalleDictamenNVDA?OpenForm&UNID=8386D4F16D6C42F584258E44006AF7E2');"
+>D382N26</a></td>
+<td class="textoContenidoTabla2" height="20px" width="65%">Procesos disciplinarios, calificación de imputabilidad administrativa, potestad disciplinaria, intervención COMPIN</td></tr>
+<tr id="D8D50A343270D59D84258E42005A5B08" bgcolor="#84b7e1">
+<td class="textoNumeracionRegistro" width="5%">2&nbsp;</td>
+<td class="textoContenidoTabla" height="20px" width="10%"> 21/07/2026</td>
+<td class="textoContenidoTabla" height="20px" width="10%">
+<a class="lkDictamen" href="javascript:void(0)"
+ onclick="registraVisitaDictamen('D8D50A343270D59D84258E42005A5B08'); muestraDictamenIframe('/LegisJuri/DictamenesGeneralesMunicipales.nsf/cgrDetalleDictamenNVDA?OpenForm&UNID=D8D50A343270D59D84258E42005A5B08');"
+>E1234Q25</a></td>
+<td class="textoContenidoTabla2" height="20px" width="65%">Licencias médicas; rechazo por COMPIN de licencia, subsidio correspondiente</td></tr>
+</table></body></html>"""
 
-    def test_query_vacia_devuelve_url_valida(self):
-        from chilean_legal_mcp.contraloria import _build_search_url
-        url = _build_search_url("", limite=10)
-        assert url.startswith("https://")
 
-    def test_caracteres_especiales_codificados(self):
-        from chilean_legal_mcp.contraloria import _build_search_url
-        url = _build_search_url("artículo 8°", limite=10)
-        assert " " not in url.split("TextoLibre=")[1].split("&")[0] or "%20" in url
+class TestUrlBusqueda:
+    def test_url_es_la_del_javascript_oficial(self):
+        from chilean_legal_mcp.contraloria import _url_busqueda
+        url = _url_busqueda("licencia médica", 25)
+        assert url.startswith("https://www.contraloria.cl")
+        assert "FormConsultaWeb2k?OpenForm" in url
+        assert "hpbb=SI" in url                      # bandera de "buscar" del JS real
+        assert "TextoLibre=licencia" in url
+        assert "dpp=25" in url and "porPagina=25" in url
+
+    def test_url_con_numero_y_fechas(self):
+        from chilean_legal_mcp.contraloria import _url_busqueda
+        url = _url_busqueda("", 10, numero="15.234", fecha_desde="01-01-2024", fecha_hasta="31-12-2024")
+        assert "NumeroDictamen=15.234" in url
+        assert "FechaDesde=01-01-2024" in url
+
+
+class TestBuscarCGRFlujo:
+    def _transport_ok(self):
+        import httpx
+
+        def handler(request: "httpx.Request") -> "httpx.Response":
+            if "hpbb=SI" in str(request.url):
+                return httpx.Response(200, text=RESULTS_HTML)
+            return httpx.Response(200, text=FORM_HTML)
+
+        return httpx.MockTransport(handler)
+
+    def test_buscar_cgr_devuelve_resultados(self):
+        """Marcado NVA (real): filas con UNID, clase lkDictamen, fecha y materia."""
+        from chilean_legal_mcp.contraloria import buscar_cgr
+        res = buscar_cgr("licencia médica", limite=10, transport=self._transport_ok())
+        assert len(res) == 2
+        numeros = {r["numero"] for r in res}
+        assert "D382N26" in numeros and "E1234Q25" in numeros
+        # detalle apunta al formulario NVDA con su UNID
+        assert any("cgrDetalleDictamenNVDA?OpenForm&UNID=8386D4F16D6C42F584258E44006AF7E2" in r["url"]
+                   for r in res)
+        # fecha DD/MM/YYYY conservada
+        assert res[0]["fecha"] == "28/07/2026"
+        assert all(r["url"].startswith("https://www.contraloria.cl") for r in res)
+
+    def test_buscar_cgr_marcado_legado_sigue_pasando(self):
+        from chilean_legal_mcp.contraloria import buscar_cgr
+        import httpx
+        transport = httpx.MockTransport(
+            lambda r: httpx.Response(200, text=LEGACY_HTML if "hpbb=SI" in str(r.url) else FORM_HTML))
+        res = buscar_cgr("licencia médica", limite=10, transport=transport)
+        assert any("15.234" in r["numero"] for r in res)
+
+    def test_total_encontrados_desde_texto(self):
+        from chilean_legal_mcp.contraloria import total_encontrados
+        assert total_encontrados(RESULTS_HTML) == 2791
+        assert total_encontrados(FORM_HTML) is None
+
+    def test_formulario_vacio_es_error_honesto_no_vacio_enganoso(self):
+        """Si la CGR devuelve el formulario (como le pasó al código anterior),
+        la herramienta dice 'CGR no disponible' — no 'no hay dictámenes'."""
+        from chilean_legal_mcp.contraloria import buscar_cgr, CGRNoDisponible
+        import httpx
+        transport = httpx.MockTransport(lambda r: httpx.Response(200, text=FORM_HTML))
+        with pytest.raises(CGRNoDisponible):
+            buscar_cgr("licencia médica", limite=10, transport=transport)
+
+    def test_sin_resultados_reales_es_lista_vacia_no_bloqueo(self):
+        """Cuando la CGR responde el formulario declarando explícitamente 'No se
+        han encontrado dictámenes', eso es una respuesta cierta y vacía — debe
+        devolver [], no alzar CGRNoDisponible (que sugeriría bloqueo)."""
+        from chilean_legal_mcp.contraloria import buscar_cgr, CGRNoDisponible
+        import httpx
+        empty_html = ("<html><body><form>...</form>"
+                      "No se han encontrado dictámenes que contienen el texto 'x'"
+                      "</body></html>")
+        transport = httpx.MockTransport(lambda r: httpx.Response(200, text=empty_html))
+        assert buscar_cgr("x", limite=10, transport=transport) == []
+
+    def test_error_de_red_es_CGRNoDisponible(self):
+        from chilean_legal_mcp.contraloria import buscar_cgr, CGRNoDisponible
+        import httpx
+
+        def handler(request):
+            raise httpx.ConnectError("caída total")
+
+        with pytest.raises(CGRNoDisponible):
+            buscar_cgr("municipalidad", transport=httpx.MockTransport(handler))
 
 
 # ─── _detectar_bloqueo ─────────────────────────────────────────────────────

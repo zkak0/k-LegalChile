@@ -22,6 +22,7 @@ ALLOWED_DOMAINS = {
     # Poder Judicial
     "www.pjud.cl",
     "portal-unificado-sentencias.pjud.cl",
+    "juris.pjud.cl",
     # Contraloría
     "www.contraloria.cl",
     # Instituto Nacional de Propiedad Industrial
@@ -67,6 +68,7 @@ HEALTH_ENDPOINTS = {
     "TGR": "https://tgr.gob.cl",
     "CGR": "https://www.contraloria.cl",
     "PJUD": "https://www.pjud.cl",
+    "PJUD jurisprudencia": "https://juris.pjud.cl/busqueda/lista_buscadores",
     "SMA": "https://snifa.sma.gob.cl",
     "INAPI": "https://buscadormarcas.inapi.cl",
     "TDPI": "https://www.tdpi.cl",

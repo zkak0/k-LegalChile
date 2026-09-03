@@ -109,9 +109,9 @@ def test_search_casos_paginacion():
 
 
 def test_server_tools_contados():
-    """server.py cuenta 77 herramientas decoradas con @mcp.tool (68 base + 9 JPL)."""
+    """server.py cuenta 82 herramientas decoradas con @mcp.tool (68 base + 9 JPL + 5 forenses/procesales)."""
     src = open("src/chilean_legal_mcp/server.py", encoding="utf-8").read()
-    assert src.count("@mcp.tool") == 77
+    assert src.count("@mcp.tool") == 82
     assert src.count("@mcp.resource") == 2
     assert src.count("@mcp.prompt") == 2
 

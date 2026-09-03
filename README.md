@@ -1,8 +1,8 @@
 # chilean-legal-mcp
 
-Servidor MCP de investigación legal chilena — 77 herramientas, fuentes oficiales verificables, sin registro ni créditos. Local, ilimitado, con cuerpo FTS, semántica híbrida, export Word/PDF y corpus JPL opcional.
+Servidor MCP de investigación legal chilena — 82 herramientas, fuentes oficiales verificables, sin registro ni créditos. Local, ilimitado, con cuerpo FTS, semántica híbrida, export Word/PDF y corpus JPL opcional.
 
-## Qué hace (77 tools: 68 base + 9 JPL)
+## Qué hace (82 tools: 68 base + 9 JPL + 5 forenses/procesales)
 
 | Herramienta | Fuente | Qué devuelve |
 |---|---|---|
@@ -21,6 +21,12 @@ Servidor MCP de investigación legal chilena — 77 herramientas, fuentes oficia
 | `jpl_buscar_ordenanza` / `jpl_listar_ordenanzas` | Ordenanzas municipales JPL | Ordenanzas por comuna/materia |
 | `jpl_generar_documento` | Corpus JPL + plantillas tribunal | Sentencias, resoluciones, oficios, comparendos |
 | `jpl_estado` | local | Estado del corpus JPL |
+| `expediente_indexar` / `expediente_preguntar` / `expediente_timeline` / `expediente_partes` | Carpeta local PDF/DOCX/TXT (FTS5) | Expediente propio: fragmentos citados, línea de tiempo, partes |
+| `expediente_citas_legales` | Expediente ↔ base nacional local | Derecho invocado con artículo/inciso + verificación [VERIFICADA]/[POR VERIFICAR] |
+| `expediente_vigencia_citas` | Expediente ↔ LeyChile | VIGENCIA de cada norma citada (derogada/refundida) + nota intertemporal |
+| `expediente_plazos` | Expediente + cómputo procesal | Plazos detectados en documentos con vencimiento y estado frente a hoy |
+| `obtener_articulo_texto` | LeyChile XML + caché | Artículo (e inciso) exacto; corte forense con ordinal º/° (art. 2 ≠ art. 20) |
+| `computar_plazo_procesal` | Reglas CPC/COT offline | Vencimiento con fundamentos (arts. 38/40 CPC, 66 COT, ley 2.977) |
 | `ayuda_acceso_abogado` | — | Links oficiales |
 
 Todas las respuestas incluyen **cita y enlace a la fuente oficial**. Fechas chilenas `DD-MM-AAAA` en entrada y salida. JPL auto-activo si `data/jpl/corpus.db.zlib` está instalado (ver `SETUP.md` + `scripts/install_jpl.py`).
@@ -60,7 +66,10 @@ src/chilean_legal_mcp/
   fuentes_externas.py # SciELO, DT, Diario Oficial
   exportar.py        # docx/pdf
   ingest.py          # incremental + bulk OFFSET
-  server.py          # FastMCP 77 tools (68 base + 9 JPL)
+  server.py          # FastMCP 82 tools (68 base + 9 JPL + 5 forenses/procesales)
+  expediente.py      # Expedientes locales (indexar/preguntar/timeline/partes/citas/vigencia/plazos)
+  citas.py           # Extracción de citas normativas (art/inciso) + corte forense de articulado
+  plazos.py          # Cómputo procesal chileno (feriados, feriado judicial, arts. 38/40 CPC)
   workflow.py        # Prompt multi-etapa
   semantico.py       # Embeddings locales
 scripts/

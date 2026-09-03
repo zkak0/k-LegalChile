@@ -161,6 +161,45 @@ def test_formateadores_narrativos(db_tmp, carpeta_caso):
     assert "No tienes expedientes" in txt_lista
 
 
+# --- OCR degradado honesto (B7) -------------------------------------------------
+
+def test_pdf_vacio_sin_motor_ocr_mensaje_util(db_tmp, monkeypatch):
+    """PDF sin texto + sin herramienta OCR → mensaje que explica cómo instalarla."""
+    monkeypatch.setattr(exp, "_ocr_disponible", lambda: None)
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        from pypdf import PdfWriter
+        PdfWriter().write(base / "hoja_escaneada.pdf")   # 0 páginas, sin texto
+        res = exp.indexar_carpeta("caso_ocr", str(base))
+        assert res["num_documentos"] == 0
+        assert res["errores"][0]["archivo"] == "hoja_escaneada.pdf"
+        assert "ocrmypdf" in res["errores"][0]["problema"]
+
+
+def test_pdf_vacio_con_ocr_fallido_no_inventa(db_tmp, monkeypatch):
+    """Si el OCR no produce texto, se informa sin maquillar."""
+    monkeypatch.setattr(exp, "_ocr_disponible", lambda: "ocrmypdf")
+    monkeypatch.setattr(exp, "_ocr_pdf", lambda ruta: None)
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        from pypdf import PdfWriter
+        PdfWriter().write(base / "hoja_rara.pdf")
+        res = exp.indexar_carpeta("caso_ocr2", str(base))
+        assert "tras intento de OCR" in res["errores"][0]["problema"]
+
+
+def test_ocr_exitoso_indexa_como_pdf_ocr(db_tmp, monkeypatch):
+    monkeypatch.setattr(exp, "_ocr_disponible", lambda: "ocrmypdf")
+    monkeypatch.setattr(exp, "_ocr_pdf", lambda ruta: "SENTENCIA. Santiago, quince de mayo de 2024. Resuelve.")
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        from pypdf import PdfWriter
+        PdfWriter().write(base / "resolucion_escaneada.pdf")
+        res = exp.indexar_carpeta("caso_ocr3", str(base))
+        assert res["num_documentos"] == 1
+        assert not res["errores"]
+
+
 def test_schema_tablas_existen(db_tmp):
     tablas = {r[0] for r in db_tmp._conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}

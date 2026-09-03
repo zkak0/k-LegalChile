@@ -16,7 +16,10 @@ def _strip_ns(tag: str) -> str:
     return tag.split("}", 1)[-1] if "}" in tag else tag
 
 
-def fetch_texto(leychile_id: str, timeout: float = 30.0) -> str | None:
+def fetch_texto(leychile_id: str, timeout: float = 30.0, max_chars: int = 14_000) -> str | None:
+    """`max_chars` acota el cuerpo para no saturar el contexto del modelo.
+    La precarga forense (scripts/precargar_codigos.py) usa un tope mucho mayor
+    para tener el cuerpo ÍNTEGRO en caché (necesario para obtener_articulo_texto)."""
     url = OBTXML.format(id=leychile_id)
     try:
         r = httpx.get(url, timeout=timeout,
@@ -33,7 +36,7 @@ def fetch_texto(leychile_id: str, timeout: float = 30.0) -> str | None:
     try:
         root = ET.fromstring(r.text.encode("utf-8") if isinstance(r.text, str) else r.content)
     except ET.ParseError:
-        return _fallback_text(r.text, leychile_id)
+        return _fallback_text(r.text, leychile_id, max_chars)
 
     # Extraer metadatos
     titulo_el = root.find(".//lc:TituloNorma", NS)
@@ -51,8 +54,8 @@ def fetch_texto(leychile_id: str, timeout: float = 30.0) -> str | None:
     cuerpo = "\n\n".join(textos)
     # Limpiar
     cuerpo = re.sub(r"\n{3,}", "\n\n", cuerpo)
-    if len(cuerpo) > 14000:
-        cuerpo = cuerpo[:14000] + "\n\n…[texto truncado, ver fuente oficial]"
+    if len(cuerpo) > max_chars:
+        cuerpo = cuerpo[:max_chars] + "\n\n…[texto truncado, ver fuente oficial]"
 
     url_oficial = f"https://www.bcn.cl/leychile/navegar?idNorma={leychile_id}"
     header = f"{titulo}\n"
@@ -62,14 +65,14 @@ def fetch_texto(leychile_id: str, timeout: float = 30.0) -> str | None:
     header += "—" * 40 + "\n\n"
 
     full = header + cuerpo
-    return full if len(cuerpo) > 200 else _fallback_text(r.text, leychile_id)
+    return full if len(cuerpo) > 200 else _fallback_text(r.text, leychile_id, max_chars)
 
 
-def _fallback_text(raw: str, leychile_id: str) -> str | None:
+def _fallback_text(raw: str, leychile_id: str, max_chars: int = 14_000) -> str | None:
     t = re.sub(r"<[^>]+>", " ", raw)
     t = html.unescape(t)
     t = re.sub(r"\s+", " ", t).strip()
-    if len(t) > 14000:
-        t = t[:14000] + " …[truncado]"
+    if len(t) > max_chars:
+        t = t[:max_chars] + " …[truncado]"
     t += f"\n\nFuente oficial: https://www.bcn.cl/leychile/navegar?idNorma={leychile_id}"
     return t if len(t) > 300 else None
