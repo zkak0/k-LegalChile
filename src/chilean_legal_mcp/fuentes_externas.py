@@ -454,36 +454,51 @@ def buscar_tdlc(query: str, limite: int = 5) -> list[dict]:
 
 
 def buscar_cplt(query: str, limite: int = 5) -> list[dict]:
-    """CPLT — jurisprudencia.cplt.cl.
+    """CPLT — jurisprudencia.cplt.cl (buscador oficial de decisiones).
 
-    NOTA (verificado 2026-09-03): el host responde 403 Forbidden a *todo*
-    (robots.txt, HEAD, IP directa, TLS Chrome, navegador real). Es denegación
-    total del servidor, no WAF negociable; no la evadimos. La función intenta
-    igualmente por si el sitio vuelve, y de lo contrario informa honestamente
-    que no está disponible en lugar de sugerir un link roto.
+    La búsqueda real es un POST WebForms a la raíz: campos
+    ``ctl00$ContentPlaceHolder1$txtBusquedaSimple`` (texto) + ``btnBuscar``
+    + tokens de página (``__VIEWSTATE``, ``__EVENTVALIDATION``). El host
+    bloquea por IP (403 global desde ciertas redes), por lo que existe un
+    relay opcional: si la variable ``CPLT_PROXY`` apunta a un proxy propio
+    (p. ej. Cloudflare Worker gratuito, ver ``scripts/cplt_worker.js``),
+    la sesión completa (GET + POST) se hace a través de él.
+
+    Si nada funciona se informa honestamente que el portal no estuvo
+    disponible desde esta red; nunca se falsifican resultados.
     """
+    base = "https://jurisprudencia.cplt.cl/"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "es-CL,es;q=0.9",
-        "Referer": "https://www.consejotransparencia.cl/",
-        "Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Site": "same-origin",
-        "Upgrade-Insecure-Requests": "1",
+        "Origin": "https://jurisprudencia.cplt.cl",
+        "Referer": base,
+        "Content-Type": "application/x-www-form-urlencoded",
     }
-    url_buscar = f"https://jurisprudencia.cplt.cl/buscar?texto={query.replace(' ', '+')}"
+    import os
+    relay = os.environ.get("CPLT_PROXY", "").strip().rstrip("/")
 
-    def _parsear(text: str) -> list[dict]:
+    def _urls_crudos(url: str) -> tuple[str, str]:
+        """Devuelve (url_real, url_a_relay)."""
+        url_relay = f"{relay}?url={url}" if relay else ""
+        return url, url_relay
+
+    def _extraer_html_por_camino(texto: str) -> list[dict]:
+        """Parseo de la página de resultados del buscador CPLT."""
         rows: list[dict] = []
-        for m in re.finditer(r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', text, re.I | re.S):
+        for m in re.finditer(r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', texto, re.I | re.S):
             href, inner = m.group(1), m.group(2)
             title = html_lib.unescape(re.sub(r"<[^>]+>", "", inner)).strip()
             title = re.sub(r"\s+", " ", title)
-            if len(title) < 20:
+            if len(title) < 15:
                 continue
-            # Filtrar navegación genérica
-            if any(k in title.lower() for k in ("iniciar sesión", "login", "ayuda", "contacto", "inicio")):
+            if any(k in title.lower() for k in (
+                "iniciar sesión", "login", "ayuda", "contacto", "inicio",
+                "cplt", "transparencia", "english",
+            )):
                 continue
-            full = href if href.startswith("http") else f"https://jurisprudencia.cplt.cl{href}"
+            full = href if href.startswith("http") else f"{base}{href.lstrip('/')}"
             if any(x["url"] == full for x in rows):
                 continue
             rows.append({"titulo": title[:180], "url": full})
@@ -491,41 +506,76 @@ def buscar_cplt(query: str, limite: int = 5) -> list[dict]:
                 break
         return rows
 
-    # 1. Intento directo con headers completos + cookies persistidas
-    from .anti_waf import _cargar_cookies, _detectar_bloqueo, _extraer_cookies_playwright, _guardar_cookies
-    cookies = _cargar_cookies("jurisprudencia.cplt.cl")
+    respuesta_vacia = [{
+        "titulo": (f"CPLT jurisprudencia no disponible desde esta red "
+                   f"(bloqueo 403 por IP del servidor del CPLT; no es falta "
+                   f"de contenido). Buscado: '{query}'. "
+                   f"Por VPN/propio relay: define CPLT_PROXY. "
+                   f"Portal manual: {base}"),
+        "url": base,
+    }]
+
     try:
-        r = httpx.get(url_buscar, timeout=20, headers=headers, follow_redirects=True, cookies=cookies)
-        if r.status_code == 200 and not _detectar_bloqueo(r):
-            nuevas = {c.name: c.value for c in r.cookies}
-            if nuevas:
-                _guardar_cookies("jurisprudencia.cplt.cl", nuevas)
-            filas = _parsear(r.text)
+        with httpx.Client(headers=headers, timeout=25, follow_redirects=True) as sesion:
+
+            def _buscar_con(cls_destino: str) -> list[dict] | None:
+                """Hace la búsqueda WebForms: GET una vez para VIEWSTATE +
+                EVENTVALIDATION, luego POST con el término. Devuelve filas."""
+                r_get = sesion.get(cls_destino, timeout=25)
+                if r_get.status_code != 200 or "ctl00_ContentPlaceHolder1_txtBusquedaSimple" not in r_get.text:
+                    return None
+                vs = re.search(r'name="__VIEWSTATE"[^>]*value="([^"]*)"', r_get.text)
+                ev = re.search(r'name="__EVENTVALIDATION"[^>]*value="([^"]*)"', r_get.text)
+                if not vs or not ev:
+                    return None
+                data = {
+                    "__VIEWSTATEGENERATOR": "471515C9",
+                    "__EVENTVALIDATION": ev.group(1),
+                    "__VIEWSTATE": vs.group(1),
+                    "ctl00$ContentPlaceHolder1$txtBusquedaSimple": query,
+                    "ctl00$ContentPlaceHolder1$btnBuscar": "Buscar decisiones",
+                    "ctl00$ContentPlaceHolder1$hdnTipoBusqueda": "1",
+                }
+                r = sesion.post(cls_destino, data=data, timeout=30)
+                if r.status_code != 200 or len(r.text) < 3000:
+                    return None
+                return _extraer_html_por_camino(r.text)
+
+            # Ruta A: directo (si la red actual no está bloqueada)
+            filas = _buscar_con(base)
             if filas:
                 return filas
+
+            # Ruta B: relay configurado (proxy del propio operador)
+            if relay:
+                # El relay hace de túnel HTTP: POST igual, apuntando al URL
+                # real como query param.
+                sesion_relay = httpx.Client(headers=headers, timeout=30, follow_redirects=True)
+                try:
+                    r_get = sesion_relay.get(f"{relay}?url={base}", timeout=25)
+                    if r_get.status_code == 200 and "txtBusquedaSimple" in r_get.text:
+                        vs = re.search(r'name="__VIEWSTATE"[^>]*value="([^"]*)"', r_get.text)
+                        ev = re.search(r'name="__EVENTVALIDATION"[^>]*value="([^"]*)"', r_get.text)
+                        if vs and ev:
+                            data = {
+                                "__VIEWSTATEGENERATOR": "471515C9",
+                                "__EVENTVALIDATION": ev.group(1),
+                                "__VIEWSTATE": vs.group(1),
+                                "ctl00$ContentPlaceHolder1$txtBusquedaSimple": query,
+                                "ctl00$ContentPlaceHolder1$btnBuscar": "Buscar decisiones",
+                            }
+                            r_post = sesion_relay.post(f"{relay}?url={base}", data=data, timeout=30)
+                            if r_post.status_code == 200:
+                                filas = _extraer_html_por_camino(r_post.text)
+                                if filas:
+                                    return filas
+                except Exception:
+                    pass
+
     except Exception:
         pass
 
-    # 2. Fallback Playwright (resuelve challenge Imperva y guarda cookies)
-    try:
-        import asyncio
-        cookies_pw = asyncio.run(
-            _extraer_cookies_playwright(url_buscar, "jurisprudencia.cplt.cl", esperar=6))
-        if cookies_pw:
-            _guardar_cookies("jurisprudencia.cplt.cl", cookies_pw)
-            r2 = httpx.get(url_buscar, timeout=20, headers=headers, follow_redirects=True,
-                           cookies={**cookies_pw})
-            if r2.status_code == 200 and not _detectar_bloqueo(r2):
-                filas = _parsear(r2.text)
-                if filas:
-                    return filas
-    except Exception:
-        pass
-
-    return [{"titulo": (f"CPLT jurisprudencia no disponible ahora "
-                        f"(403 en todo el host — no es falta de contenido). "
-                        f"Buscado: '{query}'. Portal manual: {url_buscar}"),
-             "url": url_buscar}]
+    return respuesta_vacia
 
 
 def buscar_datos_gob(query: str, limite: int = 5) -> list[dict]:
