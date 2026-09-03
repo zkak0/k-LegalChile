@@ -454,8 +454,13 @@ def buscar_tdlc(query: str, limite: int = 5) -> list[dict]:
 
 
 def buscar_cplt(query: str, limite: int = 5) -> list[dict]:
-    """CPLT — jurisprudencia.cplt.cl. Imperva WAF: httpx primero, Playwright como
-    respaldo (módulo anti_waf) si hay bloqueo.
+    """CPLT — jurisprudencia.cplt.cl.
+
+    NOTA (verificado 2026-09-03): el host responde 403 Forbidden a *todo*
+    (robots.txt, HEAD, IP directa, TLS Chrome, navegador real). Es denegación
+    total del servidor, no WAF negociable; no la evadimos. La función intenta
+    igualmente por si el sitio vuelve, y de lo contrario informa honestamente
+    que no está disponible en lugar de sugerir un link roto.
     """
     headers = {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
@@ -517,7 +522,9 @@ def buscar_cplt(query: str, limite: int = 5) -> list[dict]:
     except Exception:
         pass
 
-    return [{"titulo": f"Buscar '{query}' en CPLT — Jurisprudencia administrativa",
+    return [{"titulo": (f"CPLT jurisprudencia no disponible ahora "
+                        f"(403 en todo el host — no es falta de contenido). "
+                        f"Buscado: '{query}'. Portal manual: {url_buscar}"),
              "url": url_buscar}]
 
 
