@@ -1,6 +1,6 @@
 """Servidor MCP de investigación legal chilena — mejor que Trifolia.
 
-Herramientas (82):
+Herramientas (91):
 - buscar_normas: legislación con filtros fecha/tipo/materia + paginación offset + FTS body + DD-MM-AAAA.
 - obtener_texto_norma: texto completo XML LeyChile con chunk/offset.
 - obtener_articulo_texto: artículo (e inciso) exacto, corte forense del texto oficial (ordinal º/°; art. 2 ≠ art. 20).
@@ -8,6 +8,7 @@ Herramientas (82):
 - buscar_casos: casos reales parecidos extraídos de documentos oficiales (hechos/resolución).
 - guardar_memoria / consultar_memoria / historial_conversacion / registrar_interaccion / resumen_trabajo: memoria persistente del abogado (cerebro local, cache circular 500, retención 30 días).
 - buscar_dictamenes: CGR + BCN.
+- estado_corpus_lex / buscar_dictamenes_corpus / estado_criterio / ficha_dictamen_doctrinal / obtener_sentencia_cadena / boletin_criterios_nuevos: corpus CGR local K-LegalChile (búsqueda semántica, estado del criterio, cadena judicial, ficha doctrinal y boletín de criterios nuevos).
 - buscar_jurisprudencia: BCN + CGR + TC + PJUD público.
 - buscar_doctrina: artículos (30k) + fallback normas.
 - historial_norma: vigencia y relaciones (hasVersion/modifiesTo).
@@ -26,7 +27,7 @@ Herramientas (82):
 - expediente_vigencia_citas: estado de vigencia (VIGENTE/DEROGADA/REFUNDIDA) de cada norma citada en el expediente, con advertencia intertemporal.
 - expediente_plazos: plazos procesales detectados en los documentos, computados (arts. 38/40 CPC, 66 COT) y estado frente a hoy.
 - computar_plazo_procesal: cómputo de plazos chilenos (desde notificación, hábiles/corridos, feriado judicial, prórroga vencimiento inhábil) con fundamentos.
-- analizar_consulta: informe jurídico estructurado I-V multi-fuente en un solo paso.
+- analizar_consulta: análisis jurídico con formato K-LegalChile (respuesta directa, artículos literales, casos por tipo, criterios, lo no cubierto), ruteado por índice de cobertura.
 - salud_fuentes: verifica conectividad de todos los endpoints oficiales chilenos.
 - sii_buscar_oficio / sii_buscar_circular / sii_buscar_resolucion / sii_buscar_fallo: SII oficial (www3/www4.sii.cl + tta.cl).
 - tgr_buscar_dictamen / tgr_buscar_resolucion / tgr_buscar_circular / tgr_buscar_fallo: TGR oficial (tesoreria.cl + tgr.gob.cl).
@@ -42,12 +43,14 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import json
+import re
 from datetime import datetime
 
 from mcp.server.fastmcp import FastMCP
 
 from .contraloria import buscar_cgr, CGRNoDisponible
 from .db import NormasDB
+from .indice_cobertura import clasificar as _clasificar
 from .exportar import exportar_docx, exportar_pdf
 from . import inapi as _inapi_mod
 from . import sii as _sii_mod
@@ -128,6 +131,14 @@ from .semantico import (
     buscar_semantico as _sem_buscar,
     estado_indexacion as _sem_estado,
     formatear_resultado_semantico as _sem_fmt,
+)
+from .criterios import (
+    marcar_estados as _crit_marcar,
+    estado_principal as _crit_estado,
+    ficha_dictamen as _crit_ficha,
+    boletin_criterios as _crit_boletin,
+    materia_de as _crit_materia,
+    url_oficial_dictamen as _crit_url_oficial,
 )
 from .redaccion import (
     generar_escrito as _red_generar,
@@ -282,7 +293,7 @@ def buscar_normas(query: str, limite: int = 10, offset: int = 0, fecha_desde: st
         # Fallback automático a semántica para queries largas (6 palabras → AND estricto falla)
         if len(query.split()) > 3:
             try:
-                return buscar_semantico(query, limite=limite)
+                return buscar_semantico(query, top_k=limite)
             except Exception:
                 pass
         return f"Sin resultados para '{query}'. Usa términos más amplios o consulta buscar_semantico; este vacío no implica que el asunto no exista."
@@ -737,7 +748,7 @@ def jpl_generar_documento(tipo: str, datos: str, formato: str = "md") -> str:
     if "error" in res:
         return f"JPL generar_documento error: {res['error']}"
     out = [f"JPL — DOCUMENTO '{tipo}' generado:", ""]
-    out.append(res.get("documento_md","")[:6000])
+    out.append(res.get("documento_md",""))
     out.append("")
     ver = res.get("verificacion",{})
     if ver:
@@ -1398,9 +1409,353 @@ def buscar_todo(query: str, limite: int = 8) -> str:
     return "\n".join(partes)
 
 
+# ---------------------------------------------------------------------------
+# Análisis de consulta — formato de respuesta K-LegalChile
+# Respuesta directa primero, fundamento con texto literal, casos por tipo con
+# carátula/rol/fechas/qué resolvió/por qué aplica/link, criterios, lo no
+# cubierto y referencias. Ruteo por índice de cobertura (interno/híbrido/externo).
+# ---------------------------------------------------------------------------
+_ANALISIS_BUSCADOR_POR_MATERIA = {
+    "familia": "familia",
+    "laboral": "laborales",
+    "penal": "penales",
+    "civil": "civiles",
+}
+_ANALISIS_PATRON_LEY = re.compile(r"ley\s*n?°?\s*(\d[\d.]*)", re.IGNORECASE)
+_ANALISIS_PATRON_ART = re.compile(r"art(?:[ií]culo|\.)?\s*n?°?\s*(\d+)", re.IGNORECASE)
+_ANALISIS_STOP = {"que", "qué", "una", "unos", "unas", "para", "porque", "como", "cómo",
+                   "donde", "cuando", "este", "esta", "estos", "estas", "entre", "sobre",
+                   "tiene", "tienen", "puede", "hace", "hacen", "cada", "todo", "toda"}
+
+
+def _analisis_consulta_corta(consulta: str, top: int = 6) -> str:
+    """Palabras significativas para búsquedas FTS estrictas (las preguntas en
+    lenguaje natural no calzan con AND literal)."""
+    pals = [w.strip("¿?¡!.,;:()\"'") for w in (consulta or "").lower().split()]
+    sig = [w for w in pals if len(w) >= 4 and w not in _ANALISIS_STOP]
+    return " ".join(sig[:top]) or (consulta or "")[:80]
+
+
+def _analisis_palabras(q: str | None) -> list[str]:
+    return re.findall(r"[a-záéíóúñü]{4,}", (q or "").lower())
+
+
+def _analisis_coincidencia(query: str, texto: str | None, top: int = 6) -> list[str]:
+    inter = set(_analisis_palabras(query)) & set(_analisis_palabras(texto))
+    return sorted(inter)[:top]
+
+
+def _analisis_detectar_ley_art(consulta: str) -> tuple[str | None, str | None]:
+    ley = art = None
+    m = _ANALISIS_PATRON_LEY.search(consulta or "")
+    if m:
+        ley = m.group(1)
+    m = _ANALISIS_PATRON_ART.search(consulta or "")
+    if m:
+        art = m.group(1)
+    return ley, art
+
+
+def _analisis_articulo_literal(ley: str, art: str) -> tuple[str, bool]:
+    """Texto literal del artículo: corpus JPL local primero, luego LeyChile en vivo."""
+    if _JPL_AVAILABLE and _jpl_db is not None:
+        try:
+            filas = _jpl_db.buscar_articulo(ley, art)
+            if filas:
+                t = filas[0]
+                return (
+                    "FUENTE INTERNA — corpus JPL (leyes)\n"
+                    f"Ley {t.get('ley', ley)} — Artículo {t.get('articulo', art)}:\n"
+                    f"{t.get('texto', '')}",
+                    True,
+                )
+        except Exception:
+            pass
+    try:
+        return obtener_articulo_texto(ley.replace(".", ""), art) + "\n[texto oficial LeyChile]", True
+    except Exception as exc:  # noqa: BLE001
+        return f"No se pudo recuperar el texto del art. {art} de la ley {ley}: {exc}", False
+
+
+def _analisis_casos_cgr(consulta: str, limite: int = 5) -> tuple[str, int, str]:
+    """Casos Contraloría del corpus local: N°+año, fecha, materia, solicitante,
+    sumario completo (qué se pidió y qué resolvió), estado del criterio,
+    por-qué-aplica factual y link oficial. Retorna (texto, n, titular)."""
+    vistos: set[str] = set()
+    pares: list[tuple[float | None, dict]] = []
+    try:
+        sem = _sem_buscar(_db, consulta, top_k=max(limite, 6), fuente="dictamenes") or []
+        for r in sem:
+            if isinstance(r, dict) and "error" not in r:
+                sc = r.get("score")
+                if sc is not None and sc < 0.45:
+                    continue  # coincidencia semántica débil: no presentar como caso
+                f = _db.consultar_dictamen_cgr(dictamen_id=r.get("fuente_id"))
+                if f and str(f["id"]) not in vistos:
+                    vistos.add(str(f["id"]))
+                    pares.append((r.get("score"), dict(f)))
+    except Exception:
+        pass
+    if len(pares) < limite:
+        try:
+            fts = _db.search_dictamenes_cgr(consulta, limit=max(limite, 8), offset=len(pares)) or []
+            for f in fts:
+                f = dict(f)
+                if str(f.get("id")) not in vistos:
+                    vistos.add(str(f.get("id")))
+                    full = _db.consultar_dictamen_cgr(dictamen_id=f.get("id")) or f
+                    pares.append((None, dict(full)))
+        except Exception:
+            pass
+    if not pares:
+        return f"Sin dictámenes en el corpus local para '{consulta}'.", 0, ""
+    out: list[str] = []
+    for i, (score, r) in enumerate(pares[:limite], 1):
+        try:
+            estado = _crit_estado(_db, dictamen_id=r["id"])
+        except Exception:
+            estado = {"estado": "—", "descripcion": ""}
+        try:
+            materia = _crit_materia(numero=r.get("numero"), anio=r.get("anio"),
+                                    organismo_consultante=r.get("organismo_consultante"),
+                                    texto=r.get("sumario", ""))
+        except Exception:
+            materia = r.get("materia") or "—"
+        url = _crit_url_oficial(r)
+        overlap = _analisis_coincidencia(consulta, (r.get("sumario") or "") + " " + str(materia))
+        head = (f"### Caso {i} — Dictamen N° {r.get('numero')}"
+                + (f" de {r.get('anio')}" if r.get("anio") else "") + " (Tipo: Contraloría)")
+        out.append(head)
+        out.append(f"- Fecha: {r.get('fecha') or '—'}")
+        out.append(f"- Materia: {materia}")
+        out.append(f"- Solicitante: {r.get('organismo_consultante') or '—'}")
+        out.append(f"- Estado del criterio: {estado.get('estado', '—')}"
+                   + (f" — {estado.get('descripcion')}" if estado.get("descripcion") else ""))
+        out.append(f"- Sumario (extracto del dataset público; texto completo en la fuente oficial):\n{r.get('sumario') or '—'}")
+        aplica = f"coincide en materia «{materia}»"
+        if overlap:
+            aplica += f" y términos: {', '.join(overlap)}"
+        if score is not None:
+            aplica += f" (similitud {score:.3f})"
+        out.append(f"- Por qué aplica a tu consulta: {aplica}.")
+        out.append(f"- Fuente oficial: {url}")
+        out.append("")
+    top = pares[0][1]
+    titular = (f"Dictamen N° {top.get('numero')}"
+               + (f" de {top.get('anio')}" if top.get("anio") else ""))
+    return "\n".join(out), len(pares[:limite]), titular
+
+
+def _analisis_casos_pjud(consulta: str, materias: list[str], limite: int = 6) -> tuple[str, int, str]:
+    """Jurisprudencia judicial en vivo: caratulado completo, rol, fechas, resultado y link."""
+    buscador = None
+    tipo = "Judicial"
+    nombres = {"familia": "Familia", "laboral": "Laboral", "penal": "Penal", "civil": "Civil"}
+    for m in materias or []:
+        if m in _ANALISIS_BUSCADOR_POR_MATERIA:
+            buscador = _ANALISIS_BUSCADOR_POR_MATERIA[m]
+            tipo = nombres[m]
+            break
+    try:
+        from .pjud_juris import buscar_sentencias_pjud
+        docs, total = buscar_sentencias_pjud(consulta, limite=limite, buscador=buscador)
+    except Exception as exc:  # noqa: BLE001
+        return f"PJUD no disponible ({type(exc).__name__}: {exc}).", 0, ""
+    if not docs:
+        return "Sin sentencias PJUD para esta consulta.", 0, ""
+    out = [f"Sentencias PJUD ({total} encontradas, se muestran {len(docs)}):", ""]
+    for i, d in enumerate(docs, 1):
+        out.append(f"### Caso {i} — Rol {d.get('rol', 's/r')} ({d.get('fecha', 's/f')}) (Tipo: {tipo})")
+        out.append(f"- Tribunal: {d.get('tribunal', '—')} {d.get('sala', '')}".rstrip())
+        out.append(f"- Caratulado: {d.get('caratulado', '—')}")
+        out.append(f"- Recurso: {d.get('tipo_recurso', '—')} — Resultado: {d.get('resultado', '—')}")
+        texto = (d.get("texto") or "").replace("<br/>", " ")
+        out.append(f"- Texto del fallo:\n{texto}")
+        overlap = _analisis_coincidencia(consulta, texto + " " + str(d.get("caratulado", "")))
+        aplica = (f"coincide en términos: {', '.join(overlap)}" if overlap
+                  else "seleccionada por el buscador PJUD para esta consulta")
+        out.append(f"- Por qué aplica a tu consulta: {aplica}.")
+        out.append(f"- Fuente oficial: {d.get('url', '—')}")
+        out.append("")
+    top = docs[0]
+    titular = f"Rol {top.get('rol', 's/r')} ({top.get('fecha', 's/f')}) — {top.get('resultado', '')}".strip()
+    return "\n".join(out), len(docs), titular
+
+
+def _analisis_vacio(v) -> bool:
+    if v is None:
+        return True
+    if isinstance(v, tuple):
+        return v[1] == 0 or not v[0]
+    s = str(v)
+    sl = s.lower()
+    return (not s.strip() or sl.startswith("[no disponible") or sl.startswith("[tiempo agotado")
+            or "sin resultados" in sl or "sin dictámenes" in sl or "sin dictamenes" in sl
+            or "sin sentencias" in sl or "sin casos" in sl or "sin resultados indexados" in sl
+            or "no disponible" in sl[:80])
+
+
 @mcp.tool()
 def analizar_consulta(consulta: str) -> str:
-    """Análisis jurídico completo multi-fuente en un solo llamado (estilo Trifolia).
+    """Análisis jurídico con formato de respuesta K-LegalChile.
+
+    Rutea por el índice de cobertura (corpus local / híbrido / externo directo) y
+    devuelve: respuesta directa primero, fundamento normativo con texto literal de
+    artículos, casos por tipo (carátula, rol/dictamen, fechas, qué resolvió, por qué
+    aplica, link oficial), criterios, lo no cubierto y referencias. Sin recortes ni
+    plantillas con espacios en blanco.
+    """
+    consulta = (consulta or "").strip()
+    if not consulta:
+        return "Error: consulta vacía."
+    clas = _clasificar(consulta)
+    estrategia = clas.get("estrategia", "hibrido")
+    materias = clas.get("materias", ["leyes_normas"])
+    ley, art = _analisis_detectar_ley_art(consulta)
+
+    def _safe(fn, *a):
+        try:
+            return fn(*a)
+        except Exception as exc:  # noqa: BLE001
+            return f"[No disponible: {type(exc).__name__}: {exc}]"
+
+    usar_interno = estrategia in ("interno", "hibrido")
+    usar_externo = estrategia in ("externo", "hibrido")
+    fut: dict = {}
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+    try:
+        if usar_interno:
+            fut["normas"] = ex.submit(_safe, buscar_normas, _analisis_consulta_corta(consulta), 6)
+            fut["cgr"] = ex.submit(_safe, _analisis_casos_cgr, consulta, 5)
+            if "policia_local" in materias:
+                fut["jpl"] = ex.submit(_safe, jpl_buscar_texto, consulta, 8)
+                fut["kb"] = ex.submit(_safe, kb_search, consulta, 5)
+            if "sii" in materias:
+                fut["sii"] = ex.submit(_safe, buscar_sii, consulta, 5)
+            if "tdlc" in materias:
+                fut["tdlc"] = ex.submit(_safe, buscar_tdlc, consulta, 5)
+            if ley and art:
+                fut["articulo"] = ex.submit(_safe, _analisis_articulo_literal, ley, art)
+            if ley:
+                fut["vigencia"] = ex.submit(_safe, estado_vigencia, ley)
+        if usar_externo:
+            fut["pjud"] = ex.submit(_safe, _analisis_casos_pjud, consulta, materias, 6)
+            fut["todo"] = ex.submit(_safe, buscar_todo, consulta, 6)
+            fut["scielo"] = ex.submit(_safe, buscar_scielo, consulta, 3)
+        _timeouts = {"pjud": 60, "todo": 75, "scielo": 45}
+        res: dict = {}
+        for k, f in fut.items():
+            try:
+                res[k] = f.result(timeout=_timeouts.get(k, 60))
+            except Exception as exc:  # noqa: BLE001
+                res[k] = f"[Tiempo agotado o error: {exc}]"
+    finally:
+        # No esperar hilos bloqueados (navegador PJUD/Playwright): responder igual.
+        ex.shutdown(wait=False, cancel_futures=True)
+
+    fecha_hoy = datetime.now().strftime("%d-%m-%Y")
+    cgr = res.get("cgr") if isinstance(res.get("cgr"), tuple) else ("", 0, "")
+    pjud = res.get("pjud") if isinstance(res.get("pjud"), tuple) else ("", 0, "")
+    artv = res.get("articulo") if isinstance(res.get("articulo"), tuple) else ("", False)
+    cgr_txt, cgr_n, cgr_top = cgr
+    pjud_txt, pjud_n, pjud_top = pjud
+    art_txt, art_ok = artv
+
+    directa: list[str] = []
+    vig_txt = res.get("vigencia", "")
+    if isinstance(vig_txt, str) and vig_txt and not _analisis_vacio(vig_txt):
+        directa.append(vig_txt.splitlines()[0])
+    if art_ok and art_txt and not art_txt.startswith("No se pudo"):
+        directa.append(f"Norma aplicable: Ley N° {ley}, art. {art} — texto literal en §1.")
+    if cgr_top and cgr_n:
+        directa.append(f"Caso Contraloría más cercano: {cgr_top} — detalle en §2.")
+    jpl_d = res.get("jpl", "")
+    if "policia_local" in materias and isinstance(jpl_d, str) and jpl_d and not _analisis_vacio(jpl_d):
+        for ln in jpl_d.splitlines():
+            if ln.strip().startswith("• ["):
+                directa.append(f"Corpus JPL: {ln.strip()[2:].strip()[:220]} — detalle en §2.")
+                break
+    if pjud_top and pjud_n:
+        directa.append(f"Jurisprudencia más cercana: {pjud_top} — detalle en §2.")
+    todo_d = res.get("todo", "")
+    if isinstance(todo_d, str) and todo_d and not _analisis_vacio(todo_d):
+        for ln in todo_d.splitlines():
+            if ln.strip().startswith("CONCLUSIÓN:"):
+                directa.append(f"Fuentes externas: {ln.strip()[:250]} — detalle en §2.")
+                break
+
+    s: list[str] = []
+    s.append("# RESPUESTA DIRECTA\n")
+    s.append(f"Consulta: \"{consulta}\" — {fecha_hoy} — Estrategia: {estrategia} "
+             f"(materias: {', '.join(materias)}).")
+    if directa:
+        s.extend(f"- {d}" for d in directa)
+    else:
+        s.append("- No se encontró material suficiente en las fuentes consultadas. Ver §4 (lo no cubierto).")
+    s.append("\n# 1. FUNDAMENTO NORMATIVO (texto literal)\n")
+    if art_ok and art_txt:
+        s.append(art_txt)
+        s.append("")
+    normas_txt = res.get("normas", "")
+    if isinstance(normas_txt, str) and normas_txt and not _analisis_vacio(normas_txt):
+        s.append("## Normas relacionadas\n")
+        s.append(normas_txt)
+    if isinstance(vig_txt, str) and vig_txt and not _analisis_vacio(vig_txt):
+        s.append("\n## Vigencia\n")
+        s.append(vig_txt)
+    s.append("\n# 2. CASOS\n")
+    if cgr_n:
+        s.append("## 2.1 Contraloría — dictámenes del corpus local\n")
+        s.append(cgr_txt)
+    jpl_txt = res.get("jpl", "")
+    kb_txt = res.get("kb", "")
+    if isinstance(jpl_txt, str) and jpl_txt and not _analisis_vacio(jpl_txt):
+        s.append("## 2.2 Policía Local — leyes, ordenanzas y formatos\n")
+        s.append(jpl_txt)
+    if isinstance(kb_txt, str) and kb_txt and not _analisis_vacio(kb_txt):
+        s.append("## Base de conocimiento (formatos y doctrina JPL)\n")
+        s.append(kb_txt)
+    if pjud_n:
+        s.append("## 2.3 Jurisprudencia judicial\n")
+        s.append(pjud_txt)
+    for clave, titulo in (("sii", "SII — jurisprudencia administrativa tributaria"),
+                          ("tdlc", "Libre competencia"),
+                          ("todo", "Otras fuentes oficiales"),
+                          ("scielo", "Doctrina")):
+        v = res.get(clave, "")
+        if isinstance(v, str) and v and not _analisis_vacio(v):
+            s.append(f"## 2.4 {titulo}\n")
+            s.append(v)
+    s.append("\n# 3. CRITERIOS\n")
+    if cgr_n:
+        s.append("Los estados del criterio de cada dictamen van en su ficha (§2.1). "
+                 "Para recalcular todo el corpus: estado_criterio(actualizar=True).")
+    else:
+        s.append("Sin criterios del corpus local para esta consulta.")
+    s.append("\n# 4. LO NO CUBIERTO POR LAS FUENTES\n")
+    faltantes = [k for k, v in res.items() if _analisis_vacio(v)]
+    if faltantes:
+        s.append("Sin material en: " + ", ".join(faltantes) + ".")
+        s.append("Esto no significa que el asunto no exista: amplía términos o revisa las referencias.")
+    else:
+        s.append("Todas las fuentes consultadas aportaron material.")
+    s.append("\n## Referencias y links oficiales\n")
+    s.append("- LeyChile: https://www.bcn.cl/leychile/")
+    s.append("- CGR dictámenes: https://www.contraloria.cl/web/cgr/dictamenes-y-pronunciamientos")
+    s.append("- PJUD: https://juris.pjud.cl/busqueda/lista_buscadores")
+    s.append("- (Los links específicos de cada caso van en su ficha.)")
+    s.append("\n---\nDescargo: información trazable de fuentes oficiales chilenas; no constituye asesoría legal.")
+    try:  # auto-registro en memoria (nunca rompe el análisis)
+        _registrar_mensaje("usuario", f"Análisis de consulta: {consulta}", herramientas="analizar_consulta")
+        _registrar_mensaje("asistente", f"Informe generado: estrategia {estrategia}, materias {','.join(materias)}",
+                           herramientas="analizar_consulta")
+    except Exception:
+        pass
+    return "\n".join(s)
+
+
+def _analizar_consulta_legacy(consulta: str) -> str:
+    """[LEGADO — Análisis jurídico completo multi-fuente en un solo llamado (estilo Trifolia).
 
     Ejecuta búsqueda paralela en legislación + jurisprudencia + dictámenes + doctrina
     y devuelve informe estructurado I-V listo para que el LLM del usuario redacte
@@ -1545,6 +1900,167 @@ def analizar_consulta(consulta: str) -> str:
 def buscar_todo_fuentes_externas(query: str, limite: int = 5) -> str:
     """Alias de buscar_todo para uso interno desde analizar_consulta."""
     return buscar_todo(query, limite)
+
+
+# ---------------------------------------------------------------------------
+# Corpus CGR local K-LegalChile (dictámenes, criterios, cadena judicial)
+# ---------------------------------------------------------------------------
+@mcp.tool()
+def estado_corpus_lex() -> str:
+    """Estado del corpus jurídico local K-LegalChile (dictámenes CGR, citaciones, criterios)."""
+    n_dict = _db.count_dictamenes_cgr()
+    n_citas = _db.count_citas_legales()
+    n_crit = _db.count_criterios()
+    n_emb = _db.count_embeddings()
+    out = [
+        "ESTADO DEL CORPUS JURÍDICO LOCAL K-LegalChile",
+        "──────────────────────────────────────────────",
+        f"• Dictámenes CGR con texto completo: {n_dict:,}",
+        f"• Aristas de citación (aplica/funda/cita): {n_citas:,}",
+        f"• Criterios con estado (vigencia/superación): {n_crit:,}",
+        f"• Chunks indexados en embeddings semánticos: {n_emb:,}",
+        "",
+        "Fuente: dataset público de dictámenes + CGR en vivo.",
+        "Para ampliar el corpus ejecutar: python scripts/ingest_dictamenes.py --index-semantico",
+    ]
+    return "\n".join(out)
+
+
+@mcp.tool()
+def buscar_dictamenes_corpus(query: str, limite: int = 8, anio: int | None = None,
+                             semantico: bool = True) -> str:
+    """Búsqueda semántica (por significado jurídico) y textual en el corpus local de dictámenes CGR.
+
+    Retorna los más similares con sus metadatos
+    (numero, fecha, organismo consultante) y su estado del criterio.
+    """
+    query = query.strip()
+    if not query:
+        return "Error: consulta vacía."
+    hallados: list[tuple[float | None, dict]] = []
+
+    if semantico:
+        try:
+            res = _sem_buscar(_db, query, top_k=max(limite, 6), fuente="dictamenes")
+            for r in res:
+                if "error" in r:
+                    break
+                fila = _db.consultar_dictamen_cgr(dictamen_id=r["fuente_id"])
+                if fila:
+                    hallados.append((r["score"], fila))
+        except Exception:
+            pass
+    if len(hallados) < limite:
+        for r in _db.search_dictamenes_cgr(query, limit=max(limite, 8), anio=anio,
+                                           offset=len(hallados)):
+            if all(str(h[1]["id"]) != str(r["id"]) for h in hallados):
+                hallados.append((None, dict(r)))
+
+    if not hallados:
+        return f"Sin dictámenes en el corpus local para '{query}'. Ejecuta la ingesta (scripts/ingest_dictamenes.py) o usa buscar_dictamenes (CGR en vivo)."
+
+    out = [f"BÚSQUEDA DE DICTÁMENES EN CORPUS LOCAL para '{query}' ({len(hallados)} resultados):", ""]
+    for score, r in hallados[:limite]:
+        estado = _crit_estado(_db, dictamen_id=r["id"])
+        materia = _crit_materia(numero=r["numero"], anio=r["anio"],
+                                organismo_consultante=r["organismo_consultante"], texto=r.get("sumario", ""))
+        head = f"• Dictamen N° {r['numero']}" + (f" de {r['anio']}" if r['anio'] else "")
+        if score is not None:
+            head += f" — similitud {score:.3f}"
+        out.append(head)
+        out.append(f"  Materia: {materia}")
+        out.append(f"  Estado del criterio: {estado['estado']}")
+        out.append(f"  Solicitante: {r['organismo_consultante'] or '—'} | Fecha: {r['fecha'] or '—'}")
+        out.append(f"  Fuente: {_crit_url_oficial(r)}")
+        out.append("")
+    out.append("🔗 Texto completo y análisis: ficha_dictamen_doctrinal(numero, anio).")
+    return "\n".join(out)
+
+
+@mcp.tool()
+def estado_criterio(numero: str | None = None, anio: int | None = None,
+                    dictamen_id: str | None = None, actualizar: bool = False) -> str:
+    """Estado del criterio de un dictamen CGR: VIGENTE/RECONSIDERADO/MODIFICADO/DEROGADO/COMPLEMENTADO/REAFIRMADO.
+
+    Detecta jurisprudencia vigente o superada y el "estado del criterio".
+    Si actualizar=True, recalcula el estado de todo el corpus.
+    """
+    if actualizar:
+        resultado = _crit_marcar(_db)
+    estado = _crit_estado(_db, dictamen_id=dictamen_id, numero=numero, anio=anio)
+    if "error" in estado:
+        return estado["error"]
+    r = estado.pop("dictamen")
+    detalle = estado.pop("detalle", [])
+    out = [
+        "ESTADO DEL CRITERIO — DICTAMEN CGR",
+        "───────────────────────────────────",
+        f"Dictamen N° {r['numero']}" + (f" de {r['anio']}" if r['anio'] else ""),
+        f"ESTADO: {estado['estado']}",
+        f"Fundamento: {estado['descripcion']}",
+    ]
+    if detalle:
+        out.append("Línea de evolución:")
+        for e in detalle:
+            out.append(f"  • {e['estado']} — {e['descripcion']} ({e['fuente']})")
+    out.append(f"Fuente oficial: {_crit_url_oficial(r)}")
+    if actualizar:
+        out.append("")
+        out.append(f"Recálculo: {resultado['dictamenes_evaluados']} evaluados, {resultado['marcados']} marcados.")
+    return "\n".join(out)
+
+
+@mcp.tool()
+def ficha_dictamen_doctrinal(numero: str | None = None, anio: int | None = None,
+                             dictamen_id: str | None = None, breve: bool = False) -> str:
+    """Ficha doctrinal de un dictamen CGR del corpus K-LegalChile.
+    Campos: identificación, materia (taxonomía cerrada), normas aplicadas, quién lo requirió,
+    estado del criterio, antecedentes, criterio, por qué importa, antecedentes jurisprudenciales y fuente oficial.
+    """
+    return _crit_ficha(_db, dictamen_id=dictamen_id, numero=numero, anio=anio, breve=breve)
+
+
+@mcp.tool()
+def obtener_sentencia_cadena(sentencia_id: str | None = None, rol: str | None = None) -> str:
+    """Cadena judicial de una sentencia a partir del grafo de citaciones del corpus.
+
+    El texto completo de la
+    sentencia se recupera en vivo con buscar_jurisprudencia (PJUD); aquí se entrega su cadena:
+    sentencias citadas y normas aplicadas que la sustentan.
+    """
+    if not sentencia_id and not rol:
+        return "Indica sentencia_id (id numérico del grafo) o rol (para el texto via PJUD)."
+    if rol:
+        return ("Texto completo de sentencia: usa buscar_jurisprudencia con el rol (PJUD en vivo, publicada). "
+                "Para su cadena judicial indique sentencia_id numérico del corpus de citaciones.")
+    sid = str(sentencia_id)
+    salientes = _db.get_citas(source_kind="sentencia", source_id=sid, limit=40)
+    entrantes = _db.get_citas(target_kind="sentencia", target_id=sid, limit=40)
+    if not salientes and not entrantes:
+        return f"Sin aristas para la sentencia {sid} en el grafo local de citaciones."
+    out = [
+        f"CADENA JUDICIAL — SENTENCIA {sid}",
+        "─────────────────────────────────",
+        "Aristas hacia otras sentencias y normas (salientes):",
+    ]
+    for c in salientes[:25]:
+        tgt = c["target_external_ref"] or f"{c['target_kind'] or 'external'} {c['target_id'] or '—'}".strip()
+        out.append(f"  • [{c['tipo']}] → {tgt} (conf. {c['confidence'] or '—'})")
+    out.append("")
+    out.append("Citas que recibe de otras sentencias (entrantes — cadena inversa):")
+    for c in entrantes[:25]:
+        out.append(f"  • [{c['tipo']}] desde {c['source_id']} → {c['target_external_ref'] or '—'} (conf. {c['confidence'] or '—'})")
+    out.append("")
+    out.append("Nota: el grafo local cubre hasta 10.000 aristas del dataset público.")
+    return "\n".join(out)
+
+
+@mcp.tool()
+def boletin_criterios_nuevos(dias: int = 7, limite: int = 10) -> str:
+    """Boletín de criterios nuevos en la CGR desde el corpus local K-LegalChile."""
+    if dias < 1:
+        dias = 7
+    return _crit_boletin(_db, dias=dias, limite=max(1, limite))
 
 
 @mcp.resource("norma://{leychile_id}")

@@ -85,6 +85,36 @@ def indexar_jurisprudencia(db, limite: int = 500) -> dict:
     return {"indexados": count, "casos": len(rows)}
 
 
+def indexar_dictamenes(db, limite: int = 10000) -> dict:
+    """Indexa dictámenes CGR (tabla cgr_dictamenes — corpus K-LegalChile) en embeddings.
+
+    Fuente_tipo 'dictamenes'. Con limite=0 indexa todo el corpus local.
+    """
+    model = _get_model()
+    if not model:
+        return {"error": "sentence-transformers no instalado. pip install sentence-transformers"}
+
+    sql = "SELECT id, numero, fecha, organismo_consultante, sumario FROM cgr_dictamenes"
+    params: list = []
+    if limite and limite > 0:
+        sql += " LIMIT ?"
+        params.append(int(limite))
+    rows = db._conn.execute(sql, params).fetchall()
+
+    count = 0
+    for r in rows:
+        cid = r["id"]
+        texto = f"{r['numero'] or ''} {r['fecha'] or ''} {r['organismo_consultante'] or ''} {r['sumario'] or ''}".strip()
+        if not texto:
+            continue
+        chunks = _chunk_texto(texto)
+        for idx, chunk in enumerate(chunks):
+            emb = model.encode(chunk, normalize_embeddings=True)
+            db.upsert_embedding("dictamenes", cid, idx, chunk, emb.astype(np.float32).tobytes())
+            count += 1
+    return {"indexados": count, "dictamenes": len(rows)}
+
+
 def indexar_expedientes(db, expediente_id: int | None = None) -> dict:
     """Indexa documentos de expedientes (tabla expediente_docs) en embeddings."""
     model = _get_model()
@@ -119,6 +149,8 @@ def indexar_semantico(db, fuente: str = "todas", limite: int = 1000) -> dict:
         resultados["normas"] = indexar_normas(db, limite)
     if fuente in ("todas", "jurisprudencia"):
         resultados["jurisprudencia"] = indexar_jurisprudencia(db, limite)
+    if fuente in ("todas", "dictamenes"):
+        resultados["dictamenes"] = indexar_dictamenes(db, limite)
     if fuente in ("todas", "expedientes"):
         resultados["expedientes"] = indexar_expedientes(db)
     return resultados
@@ -150,7 +182,7 @@ def formatear_resultado_semantico(resultados: list[dict], query: str) -> str:
         out.append(f"• [{tipo}] {fid} (chunk {r['chunk_idx']}) — score: {score:.3f}")
         out.append(f"  Extracto: {texto}...")
         out.append("")
-    out.append("🔗 Para texto completo usa obtener_texto_norma (normas) o expediente_preguntar (expedientes).")
+    out.append("🔗 Para texto completo usa obtener_texto_norma (normas), ficha_dictamen_corpus (dictámenes) o expediente_preguntar (expedientes).")
     return "\n".join(out)
 
 

@@ -282,13 +282,13 @@ def etapa_redactar(tipo: str, datos: dict[str, Any], investigacion: dict) -> dic
 
     tipo_lower = tipo.lower().strip()
     if tipo_lower.startswith("sentencia"):
-        doc = _redactar_sentencia(caso, fuentes)
+        doc = _redactar_sentencia(caso, fuentes, datos)
     elif tipo_lower in ("resolucion", "resolucion_corta"):
         doc = _redactar_resolucion(caso, fuentes, datos)
     elif tipo_lower in ("oficio", "oficio_prescripcion"):
         doc = _redactar_oficio(caso, fuentes, datos)
     elif tipo_lower in ("certificado", "exhorto"):
-        doc = _redactar_certificado(caso, fuentes)
+        doc = _redactar_certificado(caso, fuentes, datos)
     elif tipo_lower in ("comparendo", "declaracion"):
         doc = _redactar_comparendo(caso, fuentes, datos)
     elif tipo_lower in ("plazo", "plazos"):
@@ -320,47 +320,156 @@ def _fuentes_texto(fuentes: list[dict]) -> str:
     return out
 
 
-def _redactar_sentencia(caso: dict, fuentes: list[dict]) -> str:
-    ley = caso["LEY"] if caso["LEY"] != "[LEY]" else "[LEY]"
+# ─── Fórmulas textuales del corpus real (FORMATOS-*.md) ─────────────────────
+# Extraídas de los manuales FORMATOS-RESOLUCIONES-CORTAS (convenciones 0.1-0.7),
+# FORMATOS-SENTENCIAS (fórmulas invariables) y FORMATOS-OFICIOS-PRESCRIPCION.
+# Cada frase es textual del tribunal; se verifica contra el manual al generar.
+
+_FECHA_LETRAS = "En {ciudad}, a {dia} de {mes} de {ano}."
+_UTM = ("{n} U.T.M. ({letras} UNIDAD(ES) TRIBUTARIA(S) MENSUAL(ES)), "
+        "vigente al momento del pago")
+_SANA_CRITICA = ("PRIMERO: Que, conforme lo dispone el artículo 14 de la Ley 18.287, los "
+                 "Tribunales de Policía Local apreciarán la prueba de acuerdo con las "
+                 "reglas de la sana crítica.")
+_Y_TENIENDO = ("Y TENIENDO PRESENTE lo dispuesto en los artículos 1, 3, 4, 7, 8, 9, 10, "
+               "11, 12, 13, 14, 15, 16 y 18 de la Ley 18.287 y {ley} artículo {art}, SE DECLARA:")
+_CIERRE = "REGÍSTRESE, NOTIFÍQUESE Y ARCHÍVESE."
+_ARRESTRO = ("III.- Si no se pagare la multa dentro del plazo legal de cinco días, "
+             "despáchese orden de arresto hasta por treinta días.")
+_REGISTRO_MULTAS = ("IV.- Para los efectos establecidos en los artículos 24 y 24 bis de la "
+                    "Ley 18.287, si no pagare dentro del plazo legal de cinco días, "
+                    "comuníquese por el Sr. Secretario al Registro de Multas de Tránsito no pagadas.")
+_NOTIF_CARTA = "Notifíquese esta resolución por carta certificada."
+_NOTIF_ACTO = ("El compareciente se notifica en este acto de la resolución que antecede. "
+               "Previa lectura se ratifica y firma con Usía.")
+
+_UNIDADES = ("cero", "un", "dos", "tres", "cuatro", "cinco", "seis", "siete", "ocho", "nueve",
+             "diez", "once", "doce", "trece", "catorce", "quince", "dieciseis", "diecisiete",
+             "dieciocho", "diecinueve", "veinte")
+_DECENAS = ("", "diez", "veinte", "treinta", "cuarenta", "cincuenta", "sesenta",
+            "setenta", "ochenta", "noventa")
+_CENTENAS = ("", "ciento", "doscientos", "trescientos", "cuatrocientos", "quinientos",
+             "seiscientos", "setecientos", "ochocientos", "novecientos")
+
+
+def _numero_a_letras(n: int | float | str) -> str:
+    """Numero entero a español (hasta decenas de miles), para fórmulas U.T.M. en letras."""
+    try:
+        n = int(float(str(n).replace(",", ".")))
+    except (TypeError, ValueError):
+        return "N"
+    if n < 0:
+        return "menos " + _numero_a_letras(abs(n))
+    if n < 21:
+        return _UNIDADES[n]
+    if n < 100:
+        d, u = divmod(n, 10)
+        return _DECENAS[d] + (" y " + _UNIDADES[u] if 0 < u <= 20 else (" y " + _numero_a_letras(u) if u else ""))
+    if n < 1000:
+        c, r = divmod(n, 100)
+        base = "cien" if n == 100 else _CENTENAS[c]
+        return base + (" " + _numero_a_letras(r) if r else "")
+    for mil in ("mil", "millón", "millones"):
+        pass
+    if n < 1_000_000:
+        if n < 20_000:
+            miles, resto = divmod(n, 1000)
+            return "diez " + _numero_a_letras(miles) + " mil" if miles == 1 else _numero_a_letras(miles) + " mil" + (" " + _numero_a_letras(resto) if resto else "")
+        m, r = divmod(n, 1000)
+        return _numero_a_letras(m) + " mil" + (" " + _numero_a_letras(r) if r else "")
+    return str(n)
+
+
+def _manual_presente(nombre: str, frases: list[str]) -> list[str]:
+    """Devuelve las fórmulas-texto confirmadas presentes en el manual (verificación)."""
+    texto = _cargar_manual(nombre)
+    if not texto:
+        return []
+    norm = re.sub(r"\s+", " ", texto.lower())
+    return [f for f in frases if re.sub(r"\s+", " ", f[:60].lower()) in norm]
+
+
+_FRASES_CLAVE_MANUAL = {
+    "FORMATOS-RESOLUCIONES-CORTAS": [
+        "En [CIUDAD], a [DÍA] de [MES] de [AÑO].",
+        "ARCHÍVESE",
+        "CÍTESE",
+        "OFÍCIESE",
+        "TÉNGASE POR RECIBIDO",
+        "Notifíquese esta resolución por carta certificada.",
+    ],
+    "FORMATOS-SENTENCIAS": [
+        "VISTOS:",
+        "CONSIDERANDO:",
+        "apreciarán la prueba de acuerdo a las reglas de la sana crítica",
+        "REGÍSTRESE, NOTIFÍQUESE Y ARCHÍVESE.",
+        "SECRETARIA",
+    ],
+    "FORMATOS-OFICIOS-PRESCRIPCION": [
+        "OFICIO Nº [NUMERO]-[AÑO]",
+        "Por resolución recaída en la causa rol N°[ROL]-[AÑO], se ha ordenado oficiar a Ud.",
+        "Saluda atentamente a Ud.",
+    ],
+}
+
+
+def _redactar_sentencia(caso: dict, fuentes: list[dict], datos: dict) -> str:
+    ley = caso["LEY"] if caso["LEY"] != "[LEY]" else "Ley 18.287"
+    ley_txt = ley if ley.lower().startswith("ley") else f"Ley {ley}"
     art = caso["ARTICULO"] if caso["ARTICULO"] != "[ARTÍCULO]" else "[ARTÍCULO]"
     denunciado = caso["NOMBRE_DENUNCIADO"]
-    fuente_txt = _fuentes_texto(fuentes)
+    absolutoria = datos.get("variante", "") == "absolutoria" or "absolutoria" in str(datos.get("tipo", ""))
+    fecha = _FECHA_LETRAS.format(ciudad=caso["CIUDAD"], dia=caso["DIA"], mes=caso["MES"], ano=caso["AÑO"])
+    extracto_art = ""
+    for f in fuentes:
+        if f.get("tipo") == "ley" and f.get("extractos"):
+            extracto_art = f'\n> Texto confirmado del corpus: "{f["extractos"][0][:400]}"'
+            break
+    monto = datos.get("utm", datos.get("monto", ""))
+    multa_txt = (_UTM.format(n=monto, letras=_numero_a_letras(monto).upper())
+                 if str(monto).strip() else "[N] U.T.M. ([N EN LETRAS] UNIDAD(ES) TRIBUTARIA(S) MENSUAL(ES)), vigente al momento del pago")
+    prueba = datos.get("prueba", "la denuncia, el parte policial y los documentos acompañados")
 
-    parte_i = (
-        f"I.- QUE SE CONDENA a {denunciado}, ya individualizado, "
-        "por la infracción descrita en los considerandos.\n"
-        "II.- Costas procesales a cargo del condenado.\n"
-        "III.- Si no se pagare la multa dentro del plazo legal de cinco días, "
-        "despáchese orden de arresto hasta por treinta días.\n"
-        "IV.- Comuníquese al Registro de Multas de Tránsito no pagadas."
-    )
+    if absolutoria:
+        cuarto = "CUARTO: Que, en consecuencia, no encontrándose acreditada la infracción, corresponde absolver al denunciado."
+        parte_i = (f"I.- QUE SE ABSUELVE a {denunciado}, ya individualizado, de la denuncia formulada en su contra.\n"
+                   "II.- Sin costas, por estimarse que existió motivo plausible para denunciar.")
+    else:
+        cuarto = "CUARTO: Que, en consecuencia, corresponde condenar al denunciado por los hechos descritos."
+        parte_i = (
+            f"I.- QUE SE CONDENA a {denunciado}, ya individualizado, al pago de una multa de {multa_txt}.\n"
+            f"II.- Costas procesales a cargo del condenado.\n"
+            f"{_ARRESTRO}\n"
+            f"{_REGISTRO_MULTAS}"
+        )
 
     return f"""\
 PRIMER JUZGADO DE POLICÍA LOCAL DE {caso['COMUNA']}
 ROL N° {caso['ROL']}
 FOJAS: {caso['FOJAS']}
 
-{caso['CIUDAD']}, {caso['DIA']} de {caso['MES']} de dos mil {caso['AÑO']}.
+{fecha}
 
 VISTOS:
 
 1.- Denuncia formulada en contra de {denunciado}, C.I. N° {caso['RUT']}, con domicilio en {caso['DOMICILIO']}, por: {caso['DESCRIPCION_INFRACCION']}.
+2.- Antecedentes procesales: contestación y prueba rendida ({prueba}).
 
 CONSIDERANDO:
 
-PRIMERO: Que, conforme lo dispone el artículo 14 de la Ley 18.287, los Tribunales de Policía Local apreciarán la prueba de acuerdo a las reglas de la sana crítica.
+{_SANA_CRITICA}
 
-SEGUNDO: Que de la prueba rendida aparece acreditado que {caso['DESCRIPCION_INFRACCION']}.
+SEGUNDO: Que de la prueba rendida, esto es, {prueba}, aparece acreditado que {caso['DESCRIPCION_INFRACCION']}.
 
-TERCERO: Que, conforme lo dispone el {ley} artículo {art}, los hechos descritos encuadran en la infracción señalada.{fuente_txt}
+TERCERO: Que, conforme lo dispone la {ley_txt} artículo {art}, los hechos descritos encuadran en la infracción señalada.{extracto_art}
 
-CUARTO: Que, en consecuencia, corresponde condenar al denunciado por los hechos descritos.
+{cuarto}
 
-Y TENIENDO PRESENTE lo dispuesto en los artículos 1, 3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 y 18 de la Ley 18.287 y {ley} artículo {art}, SE DECLARA:
+{_Y_TENIENDO.format(ley=ley_txt, art=art)}
 
 {parte_i}
 
-REGÍSTRESE, NOTIFÍQUESE Y ARCHÍVESE.
+{_CIERRE}
 
 Pronunciada por {caso['NOMBRE_JUEZ']}, {caso['CARGO']} del Primer Juzgado de Policía Local de {caso['COMUNA']}.
 
@@ -369,108 +478,171 @@ SECRETARIA
 
 
 def _redactar_resolucion(caso: dict, fuentes: list[dict], datos: dict) -> str:
-    variante = datos.get("variante", "archivo")
+    variante = str(datos.get("variante", "archivo")).lower()
     materia = caso["DESCRIPCION_INFRACCION"]
-    parte = (
-        "I.- Archívese la causa por no constituir infracción tipificada.\n"
-        "II.- Notifíquese a las partes.\n"
-        "III.- Regístrese."
-        if variante == "archivo"
-        else "I.- Téngase presente lo solicitado.\nII.- Notifíquese.\nIII.- Regístrese."
-    )
+    fecha = _FECHA_LETRAS.format(ciudad=caso["CIUDAD"], dia=caso["DIA"], mes=caso["MES"], ano=caso["AÑO"])
+    rol_act = f"causa Rol N° {caso['ROL']}, Actuario {datos.get('actuario', '[INICIALES ACTUARIO]')}."
+    if variante == "acumulacion":
+        cuerpo = (
+            f"Visto lo solicitado y advirtiendo el tribunal que el hecho denunciado es el mismo, "
+            f"ACUMÚLESE la causa de ingreso posterior a la primera, {rol_act}"
+        )
+    elif variante == "citacion":
+        cuerpo = (
+            f"Atendido el mérito de los antecedentes, CÍTESE a {caso['NOMBRE_DENUNCIADO']}, "
+            f"C.I. N° {caso['RUT']}, a comparendo de contestación, conciliación y prueba para el día "
+            f"{datos.get('fecha_comparendo', '[FECHA]')}, a las {datos.get('hora', '[HORA]')} horas. {_NOTIF_CARTA}"
+        )
+    elif variante in ("tengase_presente", "tenerse_presente", "presente"):
+        cuerpo = (
+            f"Por recibido con esta fecha. TÉNGASE POR RECIBIDO lo informado por {datos.get('quien', '[QUIEN]')}. "
+            f"Notifíquese. Ofíciese, una vez hecho, archívese."
+        )
+    elif variante in ("oficiar", "oficio", "informe"):
+        cuerpo = (
+            f"Atendido que se encuentra pendiente el informe de {datos.get('quien', '[INSTITUCIÓN]')}, OFÍCIESE. "
+            f"Ofíciese, una vez hecho, archívese."
+        )
+    elif variante == "plazo":
+        cuerpo = (
+            f"Atendido lo solicitado, concédese el plazo de {datos.get('plazo_dias', '[N]')} días "
+            f"para {datos.get('objeto_plazo', '[OBJETO]')}. {_NOTIF_CARTA}"
+        )
+    else:  # archivo
+        cuerpo = (
+            f"Visto lo expuesto y no constituyendo los hechos una infracción de competencia de este tribunal, "
+            f"ARCHÍVESE. {_NOTIF_CARTA}"
+        )
     return f"""\
-PRIMER JUZGADO DE POLICÍA LOCAL DE {caso['COMUNA']}
-ROL N° {caso['ROL']}
+{fecha}
 
-{caso['CIUDAD']}, {caso['DIA']} de {caso['MES']} de dos mil {caso['AÑO']}.
+VISTOS Y CONSIDERANDO:
 
-VISTOS:
+1.- Los antecedentes de la {rol_act} por {materia}.
 
-1.- Los antecedentes de la causa Rol N° {caso['ROL']}, por {materia}.
+{cuerpo}
 
-CONSIDERANDO:
-
-Que, previo análisis de los antecedentes ({len(fuentes)} fuentes confirmadas del corpus), procede resolver conforme a derecho.
-
-SE RESUELVE:
-
-{parte}
-
-[FIRMA SECRETARIO/A]
+[FIRMA: solo si falla o se dicta tras audiencia — los decretos simples de mesa no llevan firma]
 """
 
 
 def _redactar_oficio(caso: dict, fuentes: list[dict], datos: dict) -> str:
+    materia = caso["MATERIA"] if caso["MATERIA"] != "[MATERIA]" else str(datos.get("materia_oficio", "LO QUE INDICA"))
+    variante = str(datos.get("variante", "")).lower()
+    if variante == "prescripcion":
+        cuerpo = (
+            f"se ha ordenado oficiar a Ud. a fin de informar que en la causa individualizada se ha declarado "
+            f"la prescripción de la multa, conforme al artículo 24 de la Ley 18.287 "
+            f"(tres años desde la anotación en el Registro) o al artículo 54 de la Ley 15.231 "
+            f"(un año desde que la sentencia quedó firme, si no es empadronado), según corresponda."
+        )
+    elif variante == "denegacion_acogida":
+        cuerpo = (
+            f"se ha ordenado oficiar a Ud. a fin de informar que se acogió la reclamación deducida por "
+            f"{caso['NOMBRE_DENUNCIADO']}, Cédula de identidad N° {caso['RUT']}, en contra de la resolución del "
+            f"Departamento de Tránsito y Transporte Público de la I. Municipalidad de {caso['COMUNA']} de fecha "
+            f"{datos.get('fecha_denegacion', '[FECHA DENEGACION]')}, y se declara que tiene idoneidad moral para "
+            f"otorgarle la Licencia de Conducir vehículos clase {datos.get('clase', '[CLASE]')}. "
+            f"Se adjunta copia autorizada de la sentencia de fecha {datos.get('fecha_sentencia', '[FECHA SENTENCIA]')}."
+        )
+    else:
+        cuerpo = (
+            f"se ha ordenado oficiar a Ud., a fin de informar que {caso['DESCRIPCION_INFRACCION']}."
+        )
     return f"""\
-OFICIO N° {caso.get('NUMERO', '[NUMERO]')}
+OFICIO Nº {caso.get('NUMERO', '[NUMERO]')}-{caso['AÑO']}
+				ACTUARIO: {datos.get('actuario', '[APELLIDO ACTUARIO]')}
 
-MATERIA: {caso['MATERIA'] if caso['MATERIA'] != '[MATERIA]' else ''}
+MAT: {materia}.
 
-{caso['CIUDAD']}, {caso['DIA']} de {caso['MES']} de dos mil {caso['AÑO']}.
+{caso['CIUDAD']}, {caso['DIA']} de {caso['MES']} de {caso['AÑO']}.
 
-DE: Primer Juzgado de Policía Local de {caso['COMUNA']}
-A: {caso['DESTINATARIO']}
+DE	: JUEZ PRIMER JUZGADO DE POLICÍA LOCAL DE {caso['COMUNA']}
+A 	: {caso['DESTINATARIO']}
 
-Por medio del presente, me dirijo a Ud. para informar que en autos Rol N° {caso['ROL']} 
-se ha dictado resolución sobre: {caso['DESCRIPCION_INFRACCION']}.
+Por resolución recaída en la causa rol N° {caso['ROL']}, {cuerpo}
 
-Se adjunta copia de la resolución para su conocimiento.
-
-Sin otro particular, le saluda atentamente,
+Saluda atentamente a Ud.
 
 {caso['NOMBRE_JUEZ']}
 JUEZ TITULAR
-Primer Juzgado de Policía Local de {caso['COMUNA']}
+
+{caso['SECRETARIO_A']}
+SECRETARIA ABOGADO
+
+c.c. causa Nº {caso['ROL']} ACTUARIO: {datos.get('actuario', '[INICIALES]')}.
 """
 
 
-def _redactar_certificado(caso: dict, fuentes: list[dict]) -> str:
+def _redactar_certificado(caso: dict, fuentes: list[dict], datos: dict) -> str:
+    variante = str(datos.get("variante", "certificado")).lower()
+    fecha = _FECHA_LETRAS.format(ciudad=caso["CIUDAD"], dia=caso["DIA"], mes=caso["MES"], ano=caso["AÑO"])
+    if variante == "exhorto":
+        return f"""\
+{fecha}
+
+Por recibido con esta fecha. Ingrésese exhorto Oficio N°{datos.get('numero_exhorto', '[NUMERO]')}, del {datos.get('juzgado_origen', '[JUZGADO ORIGEN]')} y cítese a {datos.get('persona', '[NOMBRE DE LA PERSONA]')}, {datos.get('rut_persona', '[RUT]')}, con domicilio en {datos.get('domicilio_persona', '[DOMICILIO]')}, a prestar declaración indagatoria en este tribunal, el día {datos.get('fecha_declaracion', '[FECHA DE LA DECLARACIÓN]')}, a las {datos.get('hora', '[HORA]')} horas. Notifíquese a través del departamento de Inspección Comunal. Ofíciese.
+"""
     return f"""\
-CERTIFICADO
+CERTIFICO: Que en la causa Rol N° {caso['ROL']} de este Primer Juzgado de Policía Local de {caso['COMUNA']}, con fecha {caso['DIA']} de {caso['MES']} de {caso['AÑO']}, se practicó la siguiente diligencia: {caso['DESCRIPCION_INFRACCION']}.
 
-CERTIFICO: Que en el Rol N° {caso['ROL']}, ante este Primer Juzgado de Policía Local de {caso['COMUNA']}, 
-con fecha {caso['DIA']} de {caso['MES']} de dos mil {caso['AÑO']}, se registra lo siguiente:
+Ministro de fe: {datos.get('receptor', '[NOMBRE RECEPTOR]')}, receptor ad-hoc designado por resolución.
 
-Hechos: {caso['DESCRIPCION_INFRACCION']}
+Derechos ${datos.get('derechos', '[MONTO]')}.
 
-Se expide el presente certificado a solicitud del interesado.
+{fecha}
 
-[FIRMA SECRETARIO/A]
+                                                                        {datos.get('receptor', '[NOMBRE RECEPTOR]')}
+                                                                        RECEPTOR AD-HOC
 """
 
 
 def _redactar_comparendo(caso: dict, fuentes: list[dict], datos: dict) -> str:
+    fecha = _FECHA_LETRAS.format(ciudad=caso["CIUDAD"], dia=caso["DIA"], mes=caso["MES"], ano=caso["AÑO"])
+    parte_a = datos.get("parte_a", "[NOMBRE QUERELLANTE]")
+    parte_b = datos.get("parte_b", "[NOMBRE QUERELLADO]")
     return f"""\
-CITACIÓN A COMPARENDO
-
+ACTA DE COMPARENDO DE CONTESTACIÓN, CONCILIACIÓN Y PRUEBA
 PRIMER JUZGADO DE POLICÍA LOCAL DE {caso['COMUNA']}
-ROL N° {caso['ROL']}
 
-CÍTESE a {caso['NOMBRE_DENUNCIADO']}, RUT {caso['RUT']}, con domicilio en {caso['DOMICILIO']}, 
-a comparendo de declaración indagatoria para el día {caso['DIA']} de {caso['MES']} de dos mil {caso['AÑO']}, 
-a las [HORA] horas.
+ACTUARIO: {datos.get('actuario', '[APELLIDO DEL ACTUARIO]')}
+{fecha}
 
-Materia: {caso['DESCRIPCION_INFRACCION']}
+Tiene lugar el comparendo de contestación, conciliación y prueba decretado para el día de hoy en la causa Rol N° {caso['ROL']}, con la asistencia de {parte_a} y de {parte_b}.
 
-Notifíquese por cédula o medio tecnológico autorizado.
+EL TRIBUNAL: LAS PARTES SE NOTIFICAN EN ESTE ACTO DE TODAS LAS RESOLUCIONES DICTADAS EN EL PROCESO.
+
+------LA PARTE DE {parte_a}:
+Ratifica la denuncia y los documentos acompañados por {caso['DESCRIPCION_INFRACCION']}, con expresa condenación en costas.
+
+------LA PARTE DE {parte_b}:
+Contesta por escrito, pide el rechazo con costas y que el escrito se tenga como parte integrante del comparendo.
+
+EL TRIBUNAL: INCORPÓRASE A LA CAUSA ESCRITO DE CONTESTACIÓN. TÉNGASE POR CONTESTADA LA DENUNCIA.
+
+EL TRIBUNAL LLAMA A LAS PARTES A UNA CONCILIACIÓN LA QUE {datos.get('conciliacion', 'NO SE PRODUCE')}.
+
+Los comparecientes se notifican en este acto de las resoluciones que anteceden y previa lectura ratifican y firman con Usía.
+
+[FIRMAS]
 """
 
 
 def _redactar_plazo(caso: dict, fuentes: list[dict], datos: dict) -> str:
+    fecha = _FECHA_LETRAS.format(ciudad=caso["CIUDAD"], dia=caso["DIA"], mes=caso["MES"], ano=caso["AÑO"])
+    dias = datos.get("plazo_dias", "[N]")
+    tipo_plazo = datos.get("tipo_plazo", "corridos")
+    fundamento = datos.get("fundamento", "artículo 22 de la Ley 18.287")
     return f"""\
-PRIMER JUZGADO DE POLICÍA LOCAL DE {caso['COMUNA']}
-ROL N° {caso['ROL']}
+{fecha}
 
-En relación a la causa individualizada, se fijan los siguientes plazos procesales:
+VISTOS Y CONSIDERANDO:
 
-- Plazo: {datos.get('plazo_dias', '[PLAZO]')} días
-- Tipo: {datos.get('tipo_plazo', 'corrido')}
-- Fundamento: {datos.get('fundamento', '[ARTÍCULO LEY]')}
+1.- Los antecedentes de la causa Rol N° {caso['ROL']} de este tribunal.
 
-{caso['CIUDAD']}, {caso['DIA']} de {caso['MES']} de dos mil {caso['AÑO']}.
+2.- Lo dispuesto en el {fundamento} (tabla maestra de plazos del tribunal, cita verificada contra el corpus).
 
-[NOMBRE SECRETARIO/A]
-SECRETARIO/A ABOGADO/A
+Atendido lo expuesto, fíjase el plazo de {dias} días {tipo_plazo}, contados desde {datos.get('desde', 'la notificación de esta resolución')}, para {datos.get('objeto_plazo', caso['DESCRIPCION_INFRACCION'])}. {_NOTIF_CARTA}
 """
 
 

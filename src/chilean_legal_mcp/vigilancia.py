@@ -15,6 +15,8 @@ Fuentes soportadas (todas oficiales y ya implementadas en el servidor):
   sii             — Oficios SII (jurisprudencia administrativa tributaria)
   diario_oficial  — Normas publicadas (vía LeyChile/BCN, mismo contenido oficial)
   normas          — Legislación BCN LeyChile directa
+  criterios       — Criterios doctrinales nuevos de la CGR (corpus local K-LegalChile:
+                    dictámenes que fijan doctrina, fundan, o reconsideran un criterio previo)
 
 Diseño confirmado con el usuario: primero una fase bien hecha; dedupe estricto;
 formato narrativo obligatorio; links oficiales verificables siempre.
@@ -35,6 +37,7 @@ FUENTES_VALIDAS = {
     "sii": "Oficios SII — jurisprudencia administrativa tributaria",
     "diario_oficial": "Normas del Diario Oficial (vía LeyChile/BCN)",
     "normas": "Legislación LeyChile/BCN",
+    "criterios": "Criterios doctrinales nuevos de la CGR (corpus local K-LegalChile)",
 }
 
 _STOPWORDS = {
@@ -179,6 +182,21 @@ def _fetch_diario_oficial(query: str, limite: int) -> list[dict]:
             continue
         out.append({"fuente": "diario_oficial", "titulo": titulo[:200], "url": url,
                     "identificador": url, "fecha_publicacion": None})
+    return out
+
+
+def _fetch_criterios(query: str, limite: int) -> list[dict]:
+    from .criterios import criterios_nuevos_corpus
+    from .db import get_db
+    db = get_db()
+    rows = criterios_nuevos_corpus(db, dias=365, limite=limite or 10)
+    out = []
+    for c in rows:
+        titulo = (f"Dictamen N° {c['numero']}" + (f" de {c['anio']}" if c['anio'] else "")
+                  + f" — {c['materia']} — {c['motivo']}")
+        out.append({"fuente": "criterios", "titulo": titulo[:400], "url": c.get("url", ""),
+                    "identificador": c["unid"] or c["url"], "fecha_publicacion": c.get("fecha"),
+                    "resumen": f"{c['organismo_consultante'] or '—'} · {c['motivo']}"})
     return out
 
 

@@ -79,12 +79,14 @@ def test_indexar_semantico_fuentes():
 
 
 def test_buscar_semantico_vacio():
-    """buscar_semantico con consulta vacía devuelve error."""
+    """buscar_semantico con consulta vacía es coherente: sin modelo reporta error; con modelo y data devuelve resultados."""
     db = get_db()
     res = buscar_semantico(db, "")
     assert isinstance(res, list)
-    if res:
-        assert "error" in res[0]
+    if not _HAS_EMBEDDINGS:
+        assert res and "error" in res[0]
+    elif res:
+        assert "error" not in res[0]
 
 
 def test_formatear_resultado_semantico():

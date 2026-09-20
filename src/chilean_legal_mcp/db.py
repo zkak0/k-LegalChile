@@ -226,6 +226,59 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memoria_notas_fts USING fts5(
 CREATE TRIGGER IF NOT EXISTS memoria_nota_ai AFTER INSERT ON memoria_notas BEGIN
     INSERT INTO memoria_notas_fts(rowid, nombre, contenido) VALUES (new.id, new.nombre, new.contenido);
 END;
+-- Corpus K-LegalChile — dictámenes CGR con texto completo
+CREATE TABLE IF NOT EXISTS cgr_dictamenes (
+    id TEXT PRIMARY KEY,
+    numero TEXT,
+    anio INTEGER,
+    fecha TEXT,
+    organismo_consultante TEXT,
+    sumario TEXT,
+    source_url TEXT,
+    unid TEXT,
+    materia TEXT
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS cgr_dictamenes_fts USING fts5(
+    numero, organismo_consultante, sumario, content='cgr_dictamenes', content_rowid='rowid',
+    tokenize='unicode61 remove_diacritics 2'
+);
+CREATE TRIGGER IF NOT EXISTS cgr_dictamenes_ai AFTER INSERT ON cgr_dictamenes BEGIN
+    INSERT INTO cgr_dictamenes_fts(rowid, numero, organismo_consultante, sumario)
+    VALUES (new.rowid, new.numero, new.organismo_consultante, new.sumario);
+END;
+CREATE TRIGGER IF NOT EXISTS cgr_dictamenes_ad AFTER DELETE ON cgr_dictamenes BEGIN
+    INSERT INTO cgr_dictamenes_fts(cgr_dictamenes_fts, rowid, numero, organismo_consultante, sumario)
+    VALUES ('delete', old.rowid, old.numero, old.organismo_consultante, old.sumario);
+END;
+CREATE INDEX IF NOT EXISTS cgr_dictamenes_anio ON cgr_dictamenes(anio, fecha);
+CREATE INDEX IF NOT EXISTS cgr_dictamenes_numero ON cgr_dictamenes(numero, anio);
+-- Grafo de citaciones (aplica/funda/cita) entre sentencias, dictámenes y normas
+CREATE TABLE IF NOT EXISTS citas_legales (
+    id INTEGER PRIMARY KEY,
+    source_kind TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    target_kind TEXT,
+    target_id TEXT,
+    target_external_ref TEXT,
+    tipo TEXT,
+    confidence REAL
+);
+CREATE INDEX IF NOT EXISTS citas_legales_src ON citas_legales(source_kind, source_id);
+CREATE INDEX IF NOT EXISTS citas_legales_tgt ON citas_legales(target_kind, target_id);
+CREATE INDEX IF NOT EXISTS citas_legales_tipo ON citas_legales(tipo);
+-- Estado del criterio por dictamen (vigencia/superación en la línea jurisprudencial)
+CREATE TABLE IF NOT EXISTS criterios_estado (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    dictamen_id TEXT NOT NULL,
+    numero TEXT,
+    anio INTEGER,
+    estado TEXT NOT NULL,
+    descripcion TEXT,
+    fuente TEXT,
+    fecha TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS criterios_estado_d ON criterios_estado(dictamen_id);
+CREATE UNIQUE INDEX IF NOT EXISTS criterios_estado_u ON criterios_estado(dictamen_id, estado);
 """
 
 
@@ -366,6 +419,8 @@ class NormasDB:
         results = []
         for r in rows:
             v = np.frombuffer(r["vector"], dtype=np.float32)
+            if len(v) != len(q):  # vectores de otra dimensión se omiten
+                continue
             v_norm = np.linalg.norm(v)
             if v_norm > 0:
                 v = v / v_norm
@@ -428,6 +483,145 @@ class NormasDB:
             "INSERT OR REPLACE INTO vigencias (leychile_id, estado_json, consultado) VALUES (?, ?, datetime('now'))",
             (leychile_id, _json.dumps(estado, ensure_ascii=False)))
         self._conn.commit()
+
+    # --- Corpus K-LegalChile: dictámenes CGR ---
+    def upsert_dictamen_cgr(self, id: str, numero: str, anio: int | None, fecha: str | None,
+                            organismo_consultante: str | None, sumario: str | None,
+                            source_url: str | None, unid: str | None, materia: str | None) -> bool:
+        cur = self._conn.execute("SELECT 1 FROM cgr_dictamenes WHERE id=?", (str(id),))
+        if cur.fetchone():
+            return False
+        self._conn.execute(
+            "INSERT INTO cgr_dictamenes (id, numero, anio, fecha, organismo_consultante, sumario, source_url, unid, materia) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (str(id), numero, anio, fecha, organismo_consultante, sumario, source_url, unid, materia))
+        self._conn.commit()
+        return True
+
+    def search_dictamenes_cgr(self, query: str, limit: int = 10, anio: int | None = None,
+                              offset: int = 0) -> list[dict]:
+        try:
+            q = _fts_prefix_query(query)
+        except ValueError:
+            return []
+        sql = """SELECT d.id, d.numero, d.anio, d.fecha, d.organismo_consultante,
+                        substr(d.sumario,1,400) AS sumario_preview, d.source_url, d.unid, d.materia,
+                        bm25(cgr_dictamenes_fts) AS score
+                 FROM cgr_dictamenes_fts f JOIN cgr_dictamenes d ON d.rowid=f.rowid
+                 WHERE cgr_dictamenes_fts MATCH ?"""
+        params: list = [q]
+        if anio:
+            sql += " AND d.anio = ?"
+            params.append(int(anio))
+        sql += " ORDER BY score LIMIT ? OFFSET ?"
+        params += [limit, offset]
+        rows = self._conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def consultar_dictamen_cgr(self, dictamen_id: str | None = None,
+                               numero: str | None = None, anio: int | None = None,
+                               unid: str | None = None) -> dict | None:
+        sql = "SELECT * FROM cgr_dictamenes WHERE 1=1"
+        params: list = []
+        if dictamen_id:
+            sql += " AND id = ?"
+            params.append(str(dictamen_id))
+        if unid:
+            sql += " AND unid = ?"
+            params.append(str(unid).upper())
+        if numero:
+            sql += " AND numero = ?"
+            params.append(str(numero))
+        if anio:
+            sql += " AND anio = ?"
+            params.append(int(anio))
+        sql += " ORDER BY fecha DESC LIMIT 1"
+        row = self._conn.execute(sql, params).fetchone()
+        return dict(row) if row else None
+
+    def count_dictamenes_cgr(self) -> int:
+        return self._conn.execute("SELECT COUNT(*) FROM cgr_dictamenes").fetchone()[0]
+
+    def listar_dictamenes_cgr(self, anio: int | None = None, limit: int = 20,
+                              offset: int = 0, recientes: bool = True) -> list[dict]:
+        sql = "SELECT id, numero, anio, fecha, organismo_consultante, substr(sumario,1,200) AS sumario_preview, source_url, unid FROM cgr_dictamenes WHERE 1=1"
+        params: list = []
+        if anio:
+            sql += " AND anio = ?"
+            params.append(int(anio))
+        sql += f" ORDER BY fecha {'DESC' if recientes else 'ASC'} LIMIT ? OFFSET ?"
+        params += [limit, offset]
+        rows = self._conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+
+    # --- Grafo de citaciones ---
+    def upsert_cita(self, id: int, source_kind: str, source_id: str, target_kind: str | None,
+                    target_id: str | None, target_external_ref: str | None, tipo: str | None,
+                    confidence: float | None) -> bool:
+        cur = self._conn.execute("SELECT 1 FROM citas_legales WHERE id=?", (id,))
+        if cur.fetchone():
+            return False
+        self._conn.execute(
+            "INSERT INTO citas_legales (id, source_kind, source_id, target_kind, target_id, target_external_ref, tipo, confidence) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (id, source_kind, source_id, target_kind, target_id, target_external_ref, tipo, confidence))
+        self._conn.commit()
+        return True
+
+    def get_citas(self, source_kind: str | None = None, source_id: str | None = None,
+                  target_kind: str | None = None, target_id: str | None = None,
+                  tipo: str | None = None, limit: int = 50) -> list[dict]:
+        sql = "SELECT * FROM citas_legales WHERE 1=1"
+        params: list = []
+        if source_kind:
+            sql += " AND source_kind = ?"
+            params.append(source_kind)
+        if source_id:
+            sql += " AND source_id = ?"
+            params.append(str(source_id))
+        if target_kind:
+            sql += " AND target_kind = ?"
+            params.append(target_kind)
+        if target_id:
+            sql += " AND target_id = ?"
+            params.append(str(target_id))
+        if tipo:
+            sql += " AND tipo = ?"
+            params.append(tipo)
+        sql += " ORDER BY confidence DESC, id LIMIT ?"
+        params.append(limit)
+        rows = self._conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def count_citas_legales(self) -> int:
+        return self._conn.execute("SELECT COUNT(*) FROM citas_legales").fetchone()[0]
+
+    def get_cadena_dictamen(self, dictamen_id: str) -> list[dict]:
+        """Citas que un dictamen hace a otros (salida) y citas que otros hacen hacia él (entrada)."""
+        rows = self._conn.execute(
+            "SELECT * FROM citas_legales WHERE (source_kind='dictamen' AND source_id=?) "
+            "OR (target_kind='dictamen' AND target_id=?) ORDER BY id", (str(dictamen_id), str(dictamen_id))
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # --- Estado del criterio ---
+    def upsert_criterio(self, dictamen_id: str, numero: str | None, anio: int | None,
+                        estado: str, descripcion: str | None, fuente: str | None) -> bool:
+        self._conn.execute(
+            "INSERT OR REPLACE INTO criterios_estado (dictamen_id, numero, anio, estado, descripcion, fuente) "
+            "VALUES (?,?,?,?,?,?)",
+            (str(dictamen_id), numero, anio, estado, descripcion, fuente))
+        self._conn.commit()
+        return True
+
+    def get_criterios(self, dictamen_id: str) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT * FROM criterios_estado WHERE dictamen_id=? ORDER BY id", (str(dictamen_id),)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def count_criterios(self) -> int:
+        return self._conn.execute("SELECT COUNT(*) FROM criterios_estado").fetchone()[0]
 
 
 def _fts_prefix_query(query: str) -> str:
