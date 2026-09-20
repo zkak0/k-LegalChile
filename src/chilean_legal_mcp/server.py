@@ -17,6 +17,7 @@ Herramientas (82):
 - generar_escrito / generar_escrito_desde_investigacion / tipos_escrito_disponibles: redacción de escritos jurídicos (Fase 4).
 - iniciar_workflow / continuar_workflow / estado_workflow / listar_workflows: prompt multi-etapa planificar→investigar→redactar→autoverificar (Fase 5).
 - jpl_buscar_ley / jpl_buscar_articulo / jpl_verificar_vigencia / jpl_listar_leyes / jpl_listar_ordenanzas / jpl_buscar_ordenanza / jpl_buscar_texto / jpl_generar_documento / jpl_estado: corpus JPL (Ley 18.287 + ordenanzas 344 comunas, auto-activo si data/jpl/corpus.db existe).
+- kb_search / kb_get / kb_status: índice FTS5 searchable del corpus legal (leyes, ordenanzas 344 comunas, manuales de formatos y plazos).
 - buscar_scielo / buscar_dt / buscar_diario_oficial / buscar_suseso / buscar_tc / buscar_historia_ley / buscar_sii / buscar_cmf / buscar_tdlc / buscar_cplt / buscar_datos_gob: fuentes sectoriales oficiales.
 - buscar_todo: búsqueda multi-fuente paralela real (ThreadPoolExecutor 6 workers).
 - vigilancia_crear / vigilancia_listar / vigilancia_ejecutar / vigilancia_historial / vigilancia_marcar_revisados / vigilancia_eliminar / vigilancia_pausar: monitor legal automático (condición en lenguaje natural + fuentes oficiales, dedupe e informe narrativo).
@@ -792,6 +793,73 @@ def jpl_estado() -> str:
     except Exception as e:
         lines.append(f"• Error verificando corpus: {e}")
     return "\n".join(lines)
+
+
+# ── KB — índice FTS5 searchable del corpus legal ──
+
+def _kb_search():
+    try:
+        from chilean_legal_mcp.kb_search import search_kb as _s, get_document as _g, kb_status as _st
+        return _s, _g, _st
+    except Exception:
+        return None, None, None
+
+
+@mcp.tool()
+def kb_search(query: str, limite: int = 10) -> str:
+    """Búsqueda full-text FTS5 sobre todo el corpus legal indexado: leyes (53), ordenanzas (344 comunas) y manuales de formatos y plazos JPL."""
+    _s, _g, _st = _kb_search()
+    if _s is None:
+        return "KB no disponible. Ejecuta: python scripts/install_jpl.py o verifica data/jpl/corpus.db."
+    try:
+        res = _s(query, limit=min(limite, 20))
+    except Exception as e:
+        return f"Error KB search: {e}"
+    if not res:
+        return f"KB: sin resultados para '{query}'."
+    out = [f"KB — BÚSQUEDA '{query}' ({len(res)}):", ""]
+    for r in res:
+        out.append(f"• {r['path']}")
+        out.append(f"  Score: {r['score']:.3f}")
+        out.append(f"  {r['snippet']}")
+        out.append("")
+    return "\n".join(out)
+
+
+@mcp.tool()
+def kb_get(ruta: str) -> str:
+    """Retorna el contenido completo de un documento del índice KB por su ruta relativa (ej: 'leyes/Ley_18287_ESTABLECE_PROCEDIMIENTO_ANTE_LOS_JUZGADOS_DE_POLICIA_LOCAL.md')."""
+    _s, _g, _st = _kb_search()
+    if _g is None:
+        return "KB no disponible."
+    texto = _g(ruta)
+    if texto is None:
+        return f"KB: documento '{ruta}' no encontrado. Usa kb_search para localizarlo."
+    return texto
+
+
+@mcp.tool()
+def kb_status() -> str:
+    """Reporta estado del índice KB: documentos indexados, chunks, rutas disponibles."""
+    _s, _g, _st = _kb_search()
+    if _st is None:
+        return "KB no disponible."
+    try:
+        info = _st()
+    except Exception as e:
+        return f"Error KB status: {e}"
+    out = ["KB — ESTADO del índice:", ""]
+    out.append(f"• Documentos indexados: {info.get('docs', 0)}")
+    out.append(f"• Chunks indexados: {info.get('chunks', 0)}")
+    out.append(f"• Rutas únicas: {info.get('paths', 0)}")
+    out.append("")
+    out.append("Categories:")
+    out.append("  • leyes/ — 53 leyes del corpus (18.287, 18.290, 19.925, 19.496, 21.020, CPC, Constitución, ...)")
+    out.append("  • manuales/ — 6 manuales de formatos (sentencias, comparendos, resoluciones, oficios, certificados, plazos)")
+    out.append("  • ordenanzas/ — índices por comuna (providencia, santiago, las condes, rancagua, ...)")
+    out.append("")
+    out.append("Tools: kb_search(query, limite), kb_get(ruta), kb_status()")
+    return "\n".join(out)
 
 
 @mcp.tool()
