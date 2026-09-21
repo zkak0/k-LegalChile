@@ -353,7 +353,7 @@ _CENTENAS = ("", "ciento", "doscientos", "trescientos", "cuatrocientos", "quinie
 
 
 def _numero_a_letras(n: int | float | str) -> str:
-    """Numero entero a español (hasta decenas de miles), para fórmulas U.T.M. en letras."""
+    """Numero entero a español (hasta 999.999), para fórmulas U.T.M. en letras."""
     try:
         n = int(float(str(n).replace(",", ".")))
     except (TypeError, ValueError):
@@ -364,20 +364,20 @@ def _numero_a_letras(n: int | float | str) -> str:
         return _UNIDADES[n]
     if n < 100:
         d, u = divmod(n, 10)
-        return _DECENAS[d] + (" y " + _UNIDADES[u] if 0 < u <= 20 else (" y " + _numero_a_letras(u) if u else ""))
+        if d == 2 and u > 0:
+            return "veinti" + _UNIDADES[u]
+        return _DECENAS[d] + (" y " + _UNIDADES[u] if u else "")
     if n < 1000:
         c, r = divmod(n, 100)
         base = "cien" if n == 100 else _CENTENAS[c]
         return base + (" " + _numero_a_letras(r) if r else "")
-    for mil in ("mil", "millón", "millones"):
-        pass
     if n < 1_000_000:
-        if n < 20_000:
-            miles, resto = divmod(n, 1000)
-            return "diez " + _numero_a_letras(miles) + " mil" if miles == 1 else _numero_a_letras(miles) + " mil" + (" " + _numero_a_letras(resto) if resto else "")
         m, r = divmod(n, 1000)
-        return _numero_a_letras(m) + " mil" + (" " + _numero_a_letras(r) if r else "")
-    return str(n)
+        miles = "mil" if m == 1 else _numero_a_letras(m) + " mil"
+        return miles + (" " + _numero_a_letras(r) if r else "")
+    m, r = divmod(n, 1_000_000)
+    millones = "un millón" if m == 1 else _numero_a_letras(m) + " millones"
+    return millones + (" " + _numero_a_letras(r) if r else "")
 
 
 def _manual_presente(nombre: str, frases: list[str]) -> list[str]:

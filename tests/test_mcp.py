@@ -109,9 +109,9 @@ def test_search_casos_paginacion():
 
 
 def test_server_tools_contados():
-    """server.py cuenta 91 herramientas decoradas con @mcp.tool (82 base + 3 kb_search + 6 corpus CGR/veridictum/dictamina)."""
+    """server.py cuenta 90 herramientas decoradas con @mcp.tool (82 base + 3 kb_search + 6 corpus CGR local - 1 alias interno eliminado)."""
     src = open("src/chilean_legal_mcp/server.py", encoding="utf-8").read()
-    assert src.count("@mcp.tool") == 91
+    assert src.count("@mcp.tool") == 90
     assert src.count("@mcp.resource") == 2
     assert src.count("@mcp.prompt") == 2
 

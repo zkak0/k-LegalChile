@@ -1,4 +1,4 @@
-"""Servidor MCP de investigación legal chilena — mejor que Trifolia.
+"""Servidor MCP de investigación legal chilena K-LegalChile.
 
 Herramientas (91):
 - buscar_normas: legislación con filtros fecha/tipo/materia + paginación offset + FTS body + DD-MM-AAAA.
@@ -1718,13 +1718,15 @@ def analizar_consulta(consulta: str) -> str:
     if pjud_n:
         s.append("## 2.3 Jurisprudencia judicial\n")
         s.append(pjud_txt)
+    n_ext = 4
     for clave, titulo in (("sii", "SII — jurisprudencia administrativa tributaria"),
                           ("tdlc", "Libre competencia"),
                           ("todo", "Otras fuentes oficiales"),
                           ("scielo", "Doctrina")):
         v = res.get(clave, "")
         if isinstance(v, str) and v and not _analisis_vacio(v):
-            s.append(f"## 2.4 {titulo}\n")
+            s.append(f"## 2.{n_ext} {titulo}\n")
+            n_ext += 1
             s.append(v)
     s.append("\n# 3. CRITERIOS\n")
     if cgr_n:
@@ -1754,152 +1756,6 @@ def analizar_consulta(consulta: str) -> str:
     return "\n".join(s)
 
 
-def _analizar_consulta_legacy(consulta: str) -> str:
-    """[LEGADO — Análisis jurídico completo multi-fuente en un solo llamado (estilo Trifolia).
-
-    Ejecuta búsqueda paralela en legislación + jurisprudencia + dictámenes + doctrina
-    y devuelve informe estructurado I-V listo para que el LLM del usuario redacte
-    el análisis jurídico final. No inventa nada — solo entrega fuentes oficiales.
-    """
-    consulta = consulta.strip()
-    if not consulta:
-        return "Error: consulta vacía."
-
-    def _safe(fn, *a, timeout=90):
-        try:
-            return fn(*a)
-        except Exception as e:
-            return f"[Error: {e}]"
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
-        f_normas   = ex.submit(_safe, buscar_normas, consulta, 8)
-        f_juris    = ex.submit(_safe, buscar_jurisprudencia, consulta, 6)
-        f_cgr      = ex.submit(_safe, buscar_dictamenes, consulta, 4)
-        f_scielo   = ex.submit(_safe, buscar_scielo, consulta, 3)
-        f_todo     = ex.submit(_safe, buscar_todo_fuentes_externas, consulta, 4)
-        r_normas   = f_normas.result(timeout=90)
-        r_juris    = f_juris.result(timeout=90)
-        r_cgr      = f_cgr.result(timeout=90)
-        r_scielo   = f_scielo.result(timeout=60)
-        r_todo     = f_todo.result(timeout=60)
-
-    fecha_hoy = datetime.now().strftime("%d-%m-%Y")
-    palabras  = [w for w in consulta.split() if len(w) >= 4][:6]
-
-    secciones: list[str] = []
-
-    secciones.append("# I. ANTECEDENTES Y CONTEXTO JURÍDICO\n")
-    secciones.append(
-        f"Consulta: \"{consulta}\" — elaborado {fecha_hoy} — "
-        "fuentes: LeyChile/BCN, PJUD, CGR, TC, TGR, SII, SUSESO, Diario Oficial, SciELO. "
-        "Todas las citas incluyen URL oficial verificable."
-    )
-    secciones.append(
-        "Objetivo: analizar la pregunta jurídica bajo la normativa chilena vigente, "
-        "la jurisprudencia de los tribunales competentes y la doctrina académica disponible."
-    )
-    secciones.append(
-        "Alcance: este informe no reemplaza el juicio profesional del abogado. "
-        "Entrega información trazable para fundamentar decisiones."
-    )
-
-    secciones.append("# II. NORMATIVA APLICABLE (texto oficial LeyChile)\n")
-    secciones.append("Fuentes primarias — selecciona aquellas relevantes para la consulta:")
-    for p in palabras:
-        secciones.append(f"\n## Búsqueda: \"{p}\"\n")
-        try:
-            filas = _client().search_by_title(p, limit=4)
-            for r in filas:
-                secciones.append(_format_row(r))
-                url = leychile_url(r.get("leychileId") or r.get("leychile_id"))
-                if url:
-                    secciones.append(f"  Ver texto oficial: {url}")
-        except Exception:
-            pass
-    secciones.append("\n> Usa `obtener_texto_norma(id)` para recuperar el articulado completo de cualquier norma citada.\n")
-
-    secciones.append("# III. JURISPRUDENCIA Y DICTÁMENES RELACIONADOS\n")
-    secciones.append("### Jurisprudencia\n")
-    if "Sin resultados" not in r_juris and "Error" not in r_juris:
-        secciones.append(r_juris[:3000])
-    else:
-        secciones.append("No se encontró jurisprudencia indexada para esta consulta. "
-                         "Ampliar con `buscar_jurisprudencia` o `buscar_tc`.")
-
-    secciones.append("\n### Dictámenes CGR\n")
-    cgr_raw = r_cgr[:2000]
-    if "Sin dictámenes" not in cgr_raw and "Error" not in cgr_raw:
-        secciones.append(cgr_raw)
-    else:
-        secciones.append("Sin dictámenes CGR específicos. Fuente ampliable: "
-                         "https://www.contraloria.cl/web/cgr/dictamenes-y-pronunciamientos\n"
-                         "Usa `buscar_dictamenes` para búsqueda directa.")
-
-    secciones.append("\n# IV. ANÁLISIS JURÍDICO (síntesis de fuentes oficiales)\n")
-    secciones.append(
-        "Criterios extraídos de las fuentes anteriores — NO inventar. "
-        "Listar tesis encontradas con referencia a su fuente."
-    )
-    secciones.append(
-        "\n- Criterio 1: [título del criterio] — [organismo + N°/fecha] — [relevancia]\n"
-        "- Criterio 2: ..."
-    )
-    secciones.append(
-        "\nFundamento normativo identificado: [artículos aplicables con N° de ley y fecha DD-MM-AAAA]"
-    )
-    secciones.append(
-        "\nAntecedentes sectoriales (si aplica):\n"
-        + (r_todo[:2500] if isinstance(r_todo, str) else "")
-    )
-
-    secciones.append("\n# V. CONCLUSIÓN\n")
-    secciones.append("Síntesis ejecutiva en 3-5 líneas del estado de la cuestión jurídica:\n")
-    secciones.append("[Redactar conclusión a partir de las fuentes oficiales encontradas — "
-                     "no agregar especulación ni opinión personal del LLM]")
-
-    secciones.append("\n---\n## Referencias y links oficiales\n")
-    links = [
-        "LeyChile: https://www.bcn.cl/leychile/navegar?idNorma=<id>",
-        "PJUD (jurisprudencia): https://juris.pjud.cl/busqueda/lista_buscadores",
-        "TC: https://buscador.tcchile.cl/#/",
-        "CGR (dictámenes): https://www.contraloria.cl/web/cgr/dictamenes-y-pronunciamientos",
-        "SII: https://www.sii.cl",
-        "SUSESO: https://www.suseso.cl",
-        "DT: https://www.dt.gob.cl",
-        "Diario Oficial: https://www.diariooficial.interior.gob.cl",
-        "SciELO: https://search.scielo.org/?lang=es",
-    ]
-    for lk in links:
-        secciones.append(lk)
-
-    secciones.append(
-        "\n---\nCONCLUSIÓN JURÍDICA (síntesis del servidor a partir de los hallazgos):\n"
-        f"La consulta '{consulta}' arrojó material en normativa ({len(r_normas)} chars) y "
-        f"jurisprudencia/fuentes ({len(r_juris)} chars). Antes de concluir, verifica: "
-        "(1) la vigencia real de las normas citadas con estado_vigencia; "
-        "(2) que cada caso citado esté en fondo resuelto y no sea una providencia o causa inadmisible; "
-        "(3) la fecha DD-MM-AAAA de cada fuente. Declara explícitamente qué aspectos NO "
-        "quedaron cubiertos por las fuentes consultadas."
-    )
-    secciones.append(
-        "\n---\n⚠️ Descargo: Este informe se genera exclusivamente a partir de fuentes oficiales "
-        "chilenas públicas. No constituye asesoría legal. El usuario es responsable del uso "
-        "que haga de esta información."
-    )
-
-    try:  # auto-registro en memoria (nunca rompe el análisis)
-        _registrar_mensaje("usuario", f"Análisis de consulta: {consulta}", herramientas="analizar_consulta")
-        _registrar_mensaje("asistente", f"Informe generado: normativa {len(r_normas)} chars, jurisprudencia {len(r_juris)} chars",
-                           herramientas="analizar_consulta")
-    except Exception:
-        pass
-    return "\n".join(secciones)
-
-
-@mcp.tool()
-def buscar_todo_fuentes_externas(query: str, limite: int = 5) -> str:
-    """Alias de buscar_todo para uso interno desde analizar_consulta."""
-    return buscar_todo(query, limite)
 
 
 # ---------------------------------------------------------------------------
