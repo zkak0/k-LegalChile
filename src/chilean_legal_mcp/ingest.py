@@ -32,7 +32,7 @@ SEED_QUERIES = [
 
 
 def ingest(db_path: str | None = None, queries: list[str] | None = None,
-           bulk: bool = False) -> dict:
+           bulk: bool = False, desde_anio: int | None = None) -> dict:
     client = BCNClient()
     db = NormasDB(db_path)
     inserted = 0
@@ -40,7 +40,7 @@ def ingest(db_path: str | None = None, queries: list[str] | None = None,
     used_queries = queries or SEED_QUERIES
 
     if bulk:
-        return _bulk_ingest(client, db)
+        return _bulk_ingest(client, db, desde_anio=None if desde_anio is None else int(desde_anio))
 
     for q in used_queries:
         try:
@@ -71,8 +71,8 @@ def ingest(db_path: str | None = None, queries: list[str] | None = None,
     return result
 
 
-def _bulk_ingest(client: BCNClient, db: NormasDB) -> dict:
-    """Bulk optimizado: pagina por año de publicación (1990–hoy) en vez de OFFSET.
+def _bulk_ingest(client: BCNClient, db: NormasDB, desde_anio: int | None = None) -> dict:
+    """Bulk optimizado: pagina por año de publicación (1810–hoy) en vez de OFFSET.
 
     `ORDER BY fecha OFFSET N` fuerza a SPARQL a ordenar 360k filas cada llamada.
     En cambio filtrar por año es rápido porque cada lote es pequeño (miles).
@@ -80,11 +80,12 @@ def _bulk_ingest(client: BCNClient, db: NormasDB) -> dict:
     """
     from datetime import datetime
     anio_actual = datetime.now().year
+    anio_inicio = desde_anio or 1810
     batch = 1000
     total_inserted = 0
 
-    print(f"Bulk por año: {anio_actual - 36} → {anio_actual}")
-    for anio in range(1990, anio_actual + 1):
+    print(f"Bulk por año: {anio_inicio} → {anio_actual}")
+    for anio in range(anio_inicio, anio_actual + 1):
         offset_anio = 0
         while True:
             sparql = f"""PREFIX bcn: <http://datos.bcn.cl/ontologies/bcn-norms#>
@@ -125,6 +126,10 @@ SELECT ?uri ?titulo ?numero ?fecha ?leychileId WHERE {{
 if __name__ == "__main__":
     import sys
     bulk = "--bulk" in sys.argv
+    desde_anio = None
+    for i, a in enumerate(sys.argv):
+        if a == "--desde" and i + 1 < len(sys.argv):
+            desde_anio = int(sys.argv[i + 1])
     print(f"Ingesta {'masiva' if bulk else 'inicial'} de normas chilenas...")
-    stats = ingest(bulk=bulk)
+    stats = ingest(bulk=bulk, desde_anio=desde_anio)
     print(stats)

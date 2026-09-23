@@ -593,3 +593,117 @@ def buscar_datos_gob(query: str, limite: int = 5) -> list[dict]:
     except Exception:
         pass
     return [{"titulo": f"Buscar '{query}' en datos.gob.cl", "url": f"https://datos.gob.cl/dataset?q={query.replace(' ', '+')}"}]
+
+
+def buscar_fne(query: str, limite: int = 5) -> list[dict]:
+    """Fiscalía Nacional Económica — jurisprudencia y actuaciones públicas.
+
+    El sitio FNE (fne.gob.cl) sirve su biblioteca de jurisprudencia mediante
+    carga dinámica (JS); el HTML estático de las secciones muestra solo la
+    navegación. Se intentan las rutas públicas con contenido enlaceable
+    (sentencias Corte Suprema y actuaciones ante tribunales); si no hay
+    resultado enlaceable desde HTML estático, se informa honestamente y se
+    enlaza el buscador oficial del sitio.
+    """
+    palabras = {w for w in query.lower().split() if len(w) >= 3}
+    seeds = [
+        "https://www.fne.gob.cl/biblioteca/jurisprudencia/sentencias-corte-suprema/",
+        "https://www.fne.gob.cl/biblioteca/actuaciones-de-la-fne/actuaciones-ante-tribunales/",
+        "https://www.fne.gob.cl/biblioteca/actuaciones-de-la-fne/investigaciones-de-la-fne/",
+        "https://www.fne.gob.cl/ultimas-actuaciones/",
+    ]
+    for url in seeds:
+        try:
+            r = httpx.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True)
+            if r.status_code != 200:
+                continue
+            rows: list[dict] = []
+            for m in re.finditer(
+                r'<a[^>]+href="(https://www\.fne\.gob\.cl/(?:wp-content/uploads/[^"]*\.pdf|biblioteca/[^"]+))"[^>]*>([^<]{5,220})</a>',
+                r.text, re.I | re.S):
+                href, inner = m.group(1), m.group(2)
+                title = html_lib.unescape(re.sub(r"<[^>]+>", "", inner)).strip()
+                title = re.sub(r"\s+", " ", title)
+                if len(title) < 8:
+                    continue
+                if title.lower() in {"biblioteca", "biblioteca digital", "marco normativo",
+                                     "actuaciones de la fne", "actuaciones ante tribunales",
+                                     "investigaciones de la fne", "inicio", "english", "más",
+                                     "ver sentencia", "sentencias corte suprema"}:
+                    continue
+                if not palabras or any(p in title.lower() for p in palabras):
+                    if any(x["url"] == href for x in rows):
+                        continue
+                    rows.append({"titulo": title[:180], "url": href})
+                    if len(rows) >= limite:
+                        return rows
+            if rows:
+                return rows
+        except Exception:
+            continue
+    url_oficial = "https://www.fne.gob.cl/biblioteca/jurisprudencia/"
+    return [{"titulo": (f"FNE: '{query}' — la biblioteca de jurisprudencia de la FNE se "
+                        "carga dinámicamente (JS); no hay resultado enlaceable en HTML "
+                        f"estático desde esta consulta. Portal oficial: {url_oficial}"),
+             "url": url_oficial}]
+
+
+def buscar_tribunal_ambiental(query: str, limite: int = 5) -> list[dict]:
+    """Tribunales Ambientales (1º/2º/3º) — sentencias oficiales en PDF.
+
+    Estructura verificada: la página https://tribunalambiental.cl/sentencias-e-informes/sentencias/
+    lista las sentencias de los tres TA como PDF en wp-content/uploads con
+    nombre del tipo 'YYYY.MM.DD-Sentencia-R-NNN-YYYY.pdf' y enlace de expediente
+    a causas.tribunalambiental.cl/causas/<id>/ver. Casos en página única (p. ej.
+    Recurso de Protección de la Ley de Pesca) se entregan con su título.
+
+    El listado HTML solo indexa el rol de cada causa (el contenido está dentro
+    del PDF), por lo que una consulta por materia devuelve las sentencias más
+    recientes con la advertencia de consultar el texto en el PDF oficial.
+    """
+    palabras = {w for w in query.lower().split() if len(w) >= 3}
+    rol_query = None
+    rm = re.search(r"R\s*[-: ]\s*(\d{2,4})\s*[-/: ]\s*(\d{4})", query, re.I)
+    if rm:
+        rol_query = f"R-{rm.group(1)}-{rm.group(2)}"
+    seed = "https://tribunalambiental.cl/sentencias-e-informes/sentencias/"
+    try:
+        r = httpx.get(seed, timeout=25, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True)
+        if r.status_code != 200:
+            raise RuntimeError(f"status {r.status_code}")
+        rows: list[dict] = []
+        coincidencias = 0
+        for m in re.finditer(r'<a[^>]+href="(https://tribunalambiental\.cl/wp-content/uploads/[^"]+\.pdf)"[^>]*>', r.text, re.I):
+            href = html_lib.unescape(m.group(1))
+            filename = href.rsplit("/", 1)[-1]
+            rol_m = re.search(r"[Rr]\s*[-:]\s*(\d{2,4}-\d{4})", filename)
+            titulo = "Sentencia TA"
+            rol = None
+            if rol_m:
+                rol = f"R-{rol_m.group(1)}"
+                titulo = f"Sentencia Rol {rol}"
+            else:
+                titulo = filename.replace(".pdf", "").replace("-", " ")[:140] or "Sentencia TA"
+            if rol_query:
+                # Filtro por rol: comparar R-NNN-YYYY
+                if rol and rol_query.lower() in f"{rol} {filename}".lower():
+                    coincidencias += 1
+                else:
+                    continue
+            else:
+                # Sin rol: solo filtrar si el término calza con el rol/filename
+                if palabras and not any(p in f"{rol or ''} {filename}".lower() for p in palabras):
+                    continue
+            if any(x["url"] == href for x in rows):
+                continue
+            rows.append({"tipo": "pdf", "titulo": titulo[:180], "url": href})
+            if len(rows) >= limite:
+                break
+        if rows:
+            return rows
+        if rol_query and coincidencias == 0:
+            return [{"titulo": f"No se encontró la sentencia {rol_query} en el directorio de TA (puede estar en otra sala o no publicada). Directorio oficial: {seed}", "url": seed}]
+    except Exception:
+        pass
+    url_oficial = "https://tribunalambiental.cl/sentencias-e-informes/sentencias/"
+    return [{"titulo": f"Buscar '{query}' en Tribunales Ambientales (oficial)", "url": url_oficial}]

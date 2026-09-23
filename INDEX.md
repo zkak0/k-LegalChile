@@ -312,19 +312,22 @@ Activas automáticamente si `data/jpl/corpus.db` existe.
 
 | Ruta | Contenido |
 |---|---|
-| `src/chilean_legal_mcp/server.py` | 82+ tools MCP; definición de todas las herramientas |
+| `src/chilean_legal_mcp/server.py` | 93 tools MCP; definición de todas las herramientas |
 | `src/chilean_legal_mcp/jpl/` | Módulo JPL (db.py, generator.py, __init__.py) |
 | `src/chilean_legal_mcp/jpl/db.py` | Conexión corpus, FTS, búsqueda de leyes/ordenanzas/manuales |
 | `src/chilean_legal_mcp/jpl/generator.py` | Generador de documentos judiciales (7 tipos) |
 | `src/chilean_legal_mcp/pjud_juris.py` | PJUD en vivo (Playwright+stealth+F5 TSPD) |
 | `src/chilean_legal_mcp/contraloria.py` | CGR dictámenes (agente Domino) |
-| `src/chilean_legal_mcp/fuentes_externas.py` | CPLT, TC, DT, SII, CMF, TGR, INAPI, TDPI, Diario Oficial |
+| `src/chilean_legal_mcp/fuentes_externas.py` | CPLT, TC, DT, SII, CMF, TGR, INAPI, TDPI, Diario Oficial, FNE, Tribunales Ambientales |
+| `src/chilean_legal_mcp/sma.py` | SMA — SNIFA (sancionatorio + procedimientos de fiscalización) |
 | `src/chilean_legal_mcp/anti_waf.py` | Fallback cascada anti-bloqueo (curl_cffi → wafer → Camoufox → Playwright) |
 | `data/jpl/corpus.db` | Corpus JPL (5.925 ordenanzas, 53 leyes, 6 manuales) |
-| `data/normas.db` | 29.316 normas BCN cacheadas |
+| `data/normas.db` | 65.027 normas BCN + 41.845 dictámenes CGR + 859 sentencias TC + 9 textos cacheados |
+| `scripts/ingest_cgr_apibusca.py` | Ingesta masiva CGR por ventanas de fecha (checkpoint + idempotencia UNID) |
+| `scripts/ingest_sentencias_tc.py` | Ingesta de sentencias TC vía backend Paperless oficial |
 | `scripts/cplt_worker.js` | Cloudflare Worker para relay CPLT |
 | `scripts/install_jpl.py` | Instalación del corpus JPL |
-| `tests/` | Suite de tests: `test_mcp.py` (82 tools), `test_jpl.py`, `test_pjud_juris.py`, `test_contraloria.py`, `test_expediente_plazos.py` |
+| `tests/` | Suite de tests: `test_mcp.py` (93 tools), `test_jpl.py`, `test_pjud_juris.py`, `test_contraloria.py`, `test_expediente_plazos.py`, `test_indice_cobertura.py` |
 | `INDEX.md` | Este archivo |
 
 ---

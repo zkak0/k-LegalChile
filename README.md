@@ -1,8 +1,8 @@
 # chilean-legal-mcp
 
-Servidor MCP de investigación legal chilena — 82 herramientas, fuentes oficiales verificables, sin registro ni créditos. Local, ilimitado, con cuerpo FTS, semántica híbrida, export Word/PDF y corpus JPL opcional.
+Servidor MCP de investigación legal chilena — 93 herramientas, fuentes oficiales verificables, sin registro ni créditos. Local, ilimitado, con cuerpo FTS, semántica híbrida, corpus CGR/TC/LeyChile, export Word/PDF y corpus JPL opcional.
 
-## Qué hace (82 tools: 68 base + 9 JPL + 5 forenses/procesales)
+## Qué hace (93 tools: base + JPL + corpus CGR/TC + conectores FNE/TA/SMA)
 
 | Herramienta | Fuente | Qué devuelve |
 |---|---|---|
@@ -66,7 +66,7 @@ src/chilean_legal_mcp/
   fuentes_externas.py # SciELO, DT, Diario Oficial
   exportar.py        # docx/pdf
   ingest.py          # incremental + bulk OFFSET
-  server.py          # FastMCP 82 tools (68 base + 9 JPL + 5 forenses/procesales)
+  server.py          # FastMCP 93 tools (base + JPL + corpus CGR/TC + conectores FNE/TA/SMA)
   expediente.py      # Expedientes locales (indexar/preguntar/timeline/partes/citas/vigencia/plazos)
   citas.py           # Extracción de citas normativas (art/inciso) + corte forense de articulado
   plazos.py          # Cómputo procesal chileno (feriados, feriado judicial, arts. 38/40 CPC)

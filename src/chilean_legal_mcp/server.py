@@ -1,6 +1,6 @@
 """Servidor MCP de investigación legal chilena K-LegalChile.
 
-Herramientas (91):
+Herramientas (93):
 - buscar_normas: legislación con filtros fecha/tipo/materia + paginación offset + FTS body + DD-MM-AAAA.
 - obtener_texto_norma: texto completo XML LeyChile con chunk/offset.
 - obtener_articulo_texto: artículo (e inciso) exacto, corte forense del texto oficial (ordinal º/°; art. 2 ≠ art. 20).
@@ -120,12 +120,14 @@ from .fuentes_externas import buscar_cplt as _buscar_cplt
 from .fuentes_externas import buscar_datos_gob as _buscar_datos
 from .fuentes_externas import buscar_diario_oficial as _buscar_diario
 from .fuentes_externas import buscar_dt as _buscar_dt
+from .fuentes_externas import buscar_fne as _buscar_fne
 from .fuentes_externas import buscar_historia_ley as _buscar_historia
 from .fuentes_externas import buscar_scielo as _buscar_scielo
 from .fuentes_externas import buscar_sii as _buscar_sii
 from .fuentes_externas import buscar_suseso as _buscar_suseso
 from .fuentes_externas import buscar_tc as _buscar_tc
 from .fuentes_externas import buscar_tdlc as _buscar_tdlc
+from .fuentes_externas import buscar_tribunal_ambiental as _buscar_tribunal_ambiental
 from .semantico import (
     indexar_semantico as _sem_indexar,
     buscar_semantico as _sem_buscar,
@@ -1308,6 +1310,44 @@ def buscar_tdlc(query: str, limite: int = 5) -> str:
 
 
 @mcp.tool()
+def buscar_tribunal_ambiental(query: str, limite: int = 5) -> str:
+    """Busca sentencias de los Tribunales Ambientales (1º/2º/3º) — PDFs oficiales de tribunalambiental.cl."""
+    query = query.strip()
+    if not query:
+        return "Error: consulta vacía."
+    try:
+        rows = _buscar_tribunal_ambiental(query, limite=limite)
+    except Exception as exc:  # noqa: BLE001
+        return f"Error Tribunales Ambientales: {exc}"
+    out = [f"TRIBUNALES AMBIENTALES — '{query}' ({len(rows)}):", ""]
+    for r in rows:
+        out.append(f"• {r['titulo']}")
+        out.append(f"  URL: {r['url']}")
+        out.append("")
+    out.append("Fuente: Tribunales Ambientales (tribunalambiental.cl).")
+    return "\n".join(out)
+
+
+@mcp.tool()
+def buscar_fne(query: str, limite: int = 5) -> str:
+    """Busca jurisprudencia y actuaciones de la FNE (libre competencia)."""
+    query = query.strip()
+    if not query:
+        return "Error: consulta vacía."
+    try:
+        rows = _buscar_fne(query, limite=limite)
+    except Exception as exc:  # noqa: BLE001
+        return f"Error FNE: {exc}"
+    out = [f"FNE — '{query}' ({len(rows)}):", ""]
+    for r in rows:
+        out.append(f"• {r['titulo']}")
+        out.append(f"  URL: {r['url']}")
+        out.append("")
+    out.append("Fuente: FNE (fne.gob.cl).")
+    return "\n".join(out)
+
+
+@mcp.tool()
 def buscar_cplt(query: str, limite: int = 5) -> str:
     """Busca decisiones CPLT (Transparencia, amparos)."""
     query = query.strip()
@@ -1353,12 +1393,13 @@ def buscar_todo(query: str, limite: int = 8) -> str:
         return "Error: consulta vacía."
     # Detectar JPL para incluirlo en paralelo si está disponible
     _jpl_ok, _ = _jpl_check()
-    max_w = 5 if _jpl_ok else 4
+    max_w = 6 if _jpl_ok else 5
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_w) as ex:
         f_normas = ex.submit(buscar_normas, query, limite)
         f_cgr = ex.submit(buscar_dictamenes, query, limite)
         f_juris = ex.submit(buscar_jurisprudencia, query, limite)
         f_scielo = ex.submit(buscar_scielo, query, 3)
+        f_tc = ex.submit(_buscar_dictamenes_corpus_tc, query, min(limite, 5))
         f_jpl = ex.submit(jpl_buscar_texto, query, 4) if _jpl_ok else None
         try:
             r_normas = f_normas.result(timeout=60)
@@ -1376,6 +1417,10 @@ def buscar_todo(query: str, limite: int = 8) -> str:
             r_scielo = f_scielo.result(timeout=30)
         except Exception as e:
             r_scielo = f"Error SciELO: {e}"
+        try:
+            r_tc_corpus = f_tc.result(timeout=30)
+        except Exception as e:
+            r_tc_corpus = f"Error TC local: {e}"
         r_jpl = None
         if f_jpl:
             try:
@@ -1387,21 +1432,24 @@ def buscar_todo(query: str, limite: int = 8) -> str:
     partes.append(r_normas)
     partes.append("\n## 2. Dictámenes Contraloría")
     partes.append(r_cgr)
-    partes.append("\n## 3. Jurisprudencia")
+    partes.append("\n## 3. Sentencias Tribunal Constitucional (corpus local)")
+    partes.append(r_tc_corpus)
+    partes.append("\n## 4. Jurisprudencia")
     partes.append(r_juris)
-    partes.append("\n## 4. Doctrina SciELO")
+    partes.append("\n## 5. Doctrina SciELO")
     partes.append(r_scielo)
     if r_jpl is not None:
-        partes.append("\n## 5. JPL (corpus local: leyes + ordenanzas 344 comunas + manuales)")
+        partes.append("\n## 6. JPL (corpus local: leyes + ordenanzas 344 comunas + manuales)")
         partes.append(r_jpl)
     body = _db.search_textos(query, limit=3)
     if body:
-        partes.append("\n## 6. Cuerpo de normas ya cacheadas")
+        partes.append("\n## 7. Cuerpo de normas ya cacheadas")
         for h in body:
             partes.append(f"• id {h['leychile_id']}: {h['preview'][:150]}...")
     partes.append("\n---\n🔗 Links oficiales:")
     partes.append("• LeyChile: https://www.bcn.cl/leychile/navegar?idNorma=<id>")
     partes.append("• CGR: https://www.contraloria.cl/web/cgr/dictamenes-y-pronunciamientos")
+    partes.append("• TC: https://buscador.tcchile.cl/")
     partes.append("• PJUD: https://juris.pjud.cl/busqueda/lista_buscadores")
     partes.append("• SciELO: https://search.scielo.org/?q=<query>&lang=es")
     partes.append("• DT: https://www.dt.gob.cl/legislacion/1624/w3-channel.html")
@@ -1763,8 +1811,10 @@ def analizar_consulta(consulta: str) -> str:
 # ---------------------------------------------------------------------------
 @mcp.tool()
 def estado_corpus_lex() -> str:
-    """Estado del corpus jurídico local K-LegalChile (dictámenes CGR, citaciones, criterios)."""
+    """Estado del corpus jurídico local K-LegalChile (dictámenes CGR, sentencias TC, normas, citaciones, criterios)."""
     n_dict = _db.count_dictamenes_cgr()
+    n_tc = _db.count_sentencias_tc()
+    n_normas = _db.count()
     n_citas = _db.count_citas_legales()
     n_crit = _db.count_criterios()
     n_emb = _db.count_embeddings()
@@ -1772,17 +1822,41 @@ def estado_corpus_lex() -> str:
         "ESTADO DEL CORPUS JURÍDICO LOCAL K-LegalChile",
         "──────────────────────────────────────────────",
         f"• Dictámenes CGR con texto completo: {n_dict:,}",
+        f"• Sentencias del Tribunal Constitucional: {n_tc:,}",
+        f"• Normas del catálogo (BCN/LeyChile): {n_normas:,}",
         f"• Aristas de citación (aplica/funda/cita): {n_citas:,}",
         f"• Criterios con estado (vigencia/superación): {n_crit:,}",
         f"• Chunks indexados en embeddings semánticos: {n_emb:,}",
         "",
-        "Fuente: dataset público de dictámenes + CGR en vivo.",
+        "Fuente: datasets públicos (CGR, Tribunal Constitucional, biblioteca del Congreso) + fuentes oficiales en vivo.",
         "Para ampliar el corpus ejecutar: python scripts/ingest_dictamenes.py --index-semantico",
     ]
     return "\n".join(out)
 
 
 @mcp.tool()
+def _buscar_dictamenes_corpus_tc(query: str, limite: int = 5) -> str:
+    """Helper: busca sentencias TC en el corpus local (FTS) y las formatea breve."""
+    query = query.strip()
+    if not query:
+        return "Error: consulta vacía."
+    rows = _db.search_sentencias_tc(query, limit=max(limite, 5))
+    if not rows:
+        return f"Sin sentencias TC en el corpus local para '{query}'. Usa buscar_tc (buscador oficial en vivo)."
+    out = []
+    for r in rows[:limite]:
+        head = f"• Rol {r.get('rol') or '?'}"
+        if r.get("fecha"):
+            head += f" | {str(r['fecha'])[:10]}"
+        out.append(head)
+        out.append(f"  Materia/tipo: {r.get('materia') or r.get('tipo_proceso') or r.get('resultado') or '—'}")
+        if r.get("considerandos_preview"):
+            out.append(f"  Fragmento: {r['considerandos_preview'].replace(chr(10), ' ')[:180]}")
+        out.append("")
+    out.append("🔗 Ficha oficial: https://buscador.tcchile.cl/ (buscador del Tribunal Constitucional).")
+    return "\n".join(out)
+
+
 def buscar_dictamenes_corpus(query: str, limite: int = 8, anio: int | None = None,
                              semantico: bool = True) -> str:
     """Búsqueda semántica (por significado jurídico) y textual en el corpus local de dictámenes CGR.
@@ -2209,6 +2283,28 @@ def sma_buscar_sancionatorio(query: str, limite: int = 5, offset: int = 0) -> st
     for r in rows: out.append(f"• {r['titulo']}\n  URL: {r['url']}\n")
     out.append("🔗 https://snifa.sma.gob.cl/Sancionatorio")
     return "\n".join(out)
+
+@mcp.tool()
+def sma_buscar_procedimiento(query: str, limite: int = 5, offset: int = 0) -> str:
+    """SMA — expedientes de fiscalización ambiental y procedimientos (SNIFA)."""
+    query = query.strip()
+    if not query:
+        return "Error: consulta vacía."
+    cached = _db._search_generic("sma_procedimientos", "sma_procedimientos_fts", query, limite, offset)
+    if cached:
+        out = [f"SMA Procedimientos para '{query}' ({len(cached)} cache):", ""]
+        for r in cached:
+            out.append(f"• {r['titulo']}\n  URL: {r['url']}\n")
+        return "\n".join(out)
+    rows = _sma_mod.buscar_procedimiento_fiscalizacion(query, limite + offset)[offset: offset + limite]
+    for r in rows:
+        _db._upsert_generic("sma_procedimientos", "sma_procedimientos_fts", f"sma:{r['numero']}", r["numero"], r["titulo"], r["url"])
+    out = [f"SMA Procedimientos para '{query}' ({len(rows)}):", ""]
+    for r in rows:
+        out.append(f"• {r['titulo']}\n  URL: {r['url']}\n")
+    out.append("🔗 https://snifa.sma.gob.cl/ExpedienteAmbiental")
+    return "\n".join(out)
+
 
 @mcp.tool()
 def salud_fuentes(limite_ms: int = 5000) -> str:

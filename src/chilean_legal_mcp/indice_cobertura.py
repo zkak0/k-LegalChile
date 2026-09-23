@@ -9,8 +9,9 @@ Regla de decision:
 - confianza "ninguna" -> ir directo a fuentes externas (no buscar a ciegas adentro).
 
 Volumenes medidos (data/normas.db, data/jpl/corpus.db, kb/kb_index.db):
-  normas (Leyes/Textos LeyChile) = 29.316
-  Contraloria (cgr_dictamenes 10.000 + citas_legales 10.000 + criterios 91 + embeddings 11.291)
+  normas (Leyes/Textos LeyChile) = 65.027
+  Contraloria (cgr_dictamenes 41.845 + citas_legales 10.000 + criterios 91 + embeddings 11.291)
+  Tribunal Constitucional (tc_sentencias 859 con texto completo)
   JPL (leyes 53 + ordenanzas 5.925 en 339 comunas + 6 manuales de formatos)
   KB (35 documentos Markdown, ambito JPL)
   SII 23 | TGR 16 | INAPI 4 | TDLC 3 | SMA 6 | SuperIR 2
@@ -26,15 +27,21 @@ import unicodedata
 COBERTURA: dict[str, dict] = {
     "leyes_normas": {
         "fuentes": ["normas"],
-        "volumen": 29316,
+        "volumen": 65027,
         "confianza": "alta",
         "descripcion": "Leyes y textos oficiales (base LeyChile) indexados en texto completo.",
     },
     "contraloria": {
         "fuentes": ["cgr_dictamenes", "citas_legales", "criterios_estado"],
-        "volumen": 20191,
+        "volumen": 52136,
         "confianza": "alta",
         "descripcion": "Dictamenes CGR (municipios, funcionarios, probidad, estatuto administrativo) con estado del criterio.",
+    },
+    "tribunal_constitucional": {
+        "fuentes": ["tc_sentencias"],
+        "volumen": 859,
+        "confianza": "alta",
+        "descripcion": "Sentencias del Tribunal Constitucional con texto completo (inaplicabilidad, inconstitucionalidad, conflicto).",
     },
     "policia_local": {
         "fuentes": ["jpl_leyes", "jpl_ordenanzas", "jpl_manuales", "kb"],
@@ -72,6 +79,12 @@ COBERTURA: dict[str, dict] = {
         "confianza": "baja",
         "descripcion": "Medio ambiente sancionatorio: registros puntuales. Interno si calza, sino externo.",
     },
+    "ambiental": {
+        "fuentes": ["tribunales_ambientales", "fne", "sma_sancionatorio"],
+        "volumen": 0,
+        "confianza": "baja",
+        "descripcion": "Tribunales Ambientales y FNE: conectores a portales oficiales (sin corpus local). Interno si calza, sino externo.",
+    },
     "superir": {
         "fuentes": ["superir_boletin"],
         "volumen": 2,
@@ -95,6 +108,17 @@ _CLAVES: dict[str, list[str]] = {
         "municipalidad", "alcalde", "concejal", "estatuto administrativo",
         "probidad", "inhabilidad", "sumario administrativo", "toma de razon",
         "reconsideracion", "desvinculacion", "planta", "contrata", "honorarios",
+    ],
+    "tribunal_constitucional": [
+        "tribunal constitucional", "tc", "inaplicabilidad", "inconstitucionalidad",
+        "constitucionalidad", "accion de inaplicabilidad", "por inconstitucionalidad",
+        "requerimiento de inaplicabilidad", "auto acordado", "quorum constitucional",
+    ],
+    "ambiental": [
+        "tribunal ambiental", "tribunales ambientales", "impacto ambiental",
+        "evaluacion de impacto", "rca", "plan de descontaminacion", "smce",
+        "fiscalia nacional economica", "fne", "libre competencia", "colusion",
+        "abuso de posicion dominante", "actuacion de la fne",
     ],
     "policia_local": [
         "policia local", "jpl", "ordenanza", "ordenanzas", "ruidos molestos",

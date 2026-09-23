@@ -17,6 +17,10 @@ data/cookies/
 data/*.db
 data/**/*.db
 data/**/*.zlib
+data/*.csv
+data/*.json
+data/**/*.csv
+data/**/*.json
 /kb/*.db
 casos/*.pdf
 logs/

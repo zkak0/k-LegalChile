@@ -102,6 +102,9 @@ CREATE TRIGGER IF NOT EXISTS superir_boletin_ai AFTER INSERT ON superir_boletin 
 CREATE TABLE IF NOT EXISTS sma_sancionatorio (id TEXT PRIMARY KEY, numero TEXT, titulo TEXT, url TEXT);
 CREATE VIRTUAL TABLE IF NOT EXISTS sma_sancionatorio_fts USING fts5(titulo, numero, content='sma_sancionatorio', content_rowid='rowid', tokenize='unicode61 remove_diacritics 2');
 CREATE TRIGGER IF NOT EXISTS sma_sancionatorio_ai AFTER INSERT ON sma_sancionatorio BEGIN INSERT INTO sma_sancionatorio_fts(rowid, titulo, numero) VALUES (new.rowid, new.titulo, new.numero); END;
+CREATE TABLE IF NOT EXISTS sma_procedimientos (id TEXT PRIMARY KEY, numero TEXT, titulo TEXT, url TEXT);
+CREATE VIRTUAL TABLE IF NOT EXISTS sma_procedimientos_fts USING fts5(titulo, numero, content='sma_procedimientos', content_rowid='rowid', tokenize='unicode61 remove_diacritics 2');
+CREATE TRIGGER IF NOT EXISTS sma_procedimientos_ai AFTER INSERT ON sma_procedimientos BEGIN INSERT INTO sma_procedimientos_fts(rowid, titulo, numero) VALUES (new.rowid, new.titulo, new.numero); END;
 -- Cache de vigencia de normas (cambia raramente; TTL 7 días)
 CREATE TABLE IF NOT EXISTS vigencias (
     leychile_id TEXT PRIMARY KEY,
@@ -236,7 +239,8 @@ CREATE TABLE IF NOT EXISTS cgr_dictamenes (
     sumario TEXT,
     source_url TEXT,
     unid TEXT,
-    materia TEXT
+    materia TEXT,
+    raw_json TEXT
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS cgr_dictamenes_fts USING fts5(
     numero, organismo_consultante, sumario, content='cgr_dictamenes', content_rowid='rowid',
@@ -279,6 +283,40 @@ CREATE TABLE IF NOT EXISTS criterios_estado (
 );
 CREATE INDEX IF NOT EXISTS criterios_estado_d ON criterios_estado(dictamen_id);
 CREATE UNIQUE INDEX IF NOT EXISTS criterios_estado_u ON criterios_estado(dictamen_id, estado);
+-- Corpus K-LegalChile — sentencias del Tribunal Constitucional (buscador oficial)
+CREATE TABLE IF NOT EXISTS tc_sentencias (
+    id INTEGER PRIMARY KEY,
+    rol TEXT,
+    papelera INTEGER,
+    titulo TEXT,
+    fecha TEXT,
+    caratulado TEXT,
+    tipo_proceso TEXT,
+    resultado TEXT,
+    competencia TEXT,
+    materia TEXT,
+    considerandos TEXT,
+    decision TEXT,
+    contenido TEXT,
+    source_url TEXT,
+    raw_json TEXT,
+    saved_at TEXT DEFAULT (datetime('now','localtime'))
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS tc_sentencias_fts USING fts5(
+    rol, titulo, caratulado, tipo_proceso, resultado, materia, contenido,
+    content='tc_sentencias', content_rowid='rowid',
+    tokenize='unicode61 remove_diacritics 2'
+);
+CREATE TRIGGER IF NOT EXISTS tc_sentencias_ai AFTER INSERT ON tc_sentencias BEGIN
+    INSERT INTO tc_sentencias_fts(rowid, rol, titulo, caratulado, tipo_proceso, resultado, materia, contenido)
+    VALUES (new.rowid, new.rol, new.titulo, new.caratulado, new.tipo_proceso, new.resultado, new.materia, new.contenido);
+END;
+CREATE TRIGGER IF NOT EXISTS tc_sentencias_ad AFTER DELETE ON tc_sentencias BEGIN
+    INSERT INTO tc_sentencias_fts(tc_sentencias_fts, rowid, rol, titulo, caratulado, tipo_proceso, resultado, materia, contenido)
+    VALUES ('delete', old.rowid, old.rol, old.titulo, old.caratulado, old.tipo_proceso, old.resultado, old.materia, old.contenido);
+END;
+CREATE INDEX IF NOT EXISTS tc_sentencias_rol ON tc_sentencias(rol);
+CREATE INDEX IF NOT EXISTS tc_sentencias_fecha ON tc_sentencias(fecha);
 """
 
 
@@ -290,6 +328,13 @@ class NormasDB:
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(SCHEMA)
         self._conn.commit()
+        self._migrar_columnas()
+
+    def _migrar_columnas(self) -> None:
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(cgr_dictamenes)").fetchall()}
+        if "raw_json" not in cols:
+            self._conn.execute("ALTER TABLE cgr_dictamenes ADD COLUMN raw_json TEXT")
+            self._conn.commit()
 
     def upsert_norma(self, uri: str, titulo: str, numero: str | None,
                      fecha: str | None, leychile_id: str | None) -> bool:
@@ -487,14 +532,19 @@ class NormasDB:
     # --- Corpus K-LegalChile: dictámenes CGR ---
     def upsert_dictamen_cgr(self, id: str, numero: str, anio: int | None, fecha: str | None,
                             organismo_consultante: str | None, sumario: str | None,
-                            source_url: str | None, unid: str | None, materia: str | None) -> bool:
-        cur = self._conn.execute("SELECT 1 FROM cgr_dictamenes WHERE id=?", (str(id),))
-        if cur.fetchone():
+                            source_url: str | None, unid: str | None, materia: str | None,
+                            raw_json: str | None = None) -> bool:
+        cur = self._conn.execute("SELECT 1, raw_json FROM cgr_dictamenes WHERE id=?", (str(id),))
+        row = cur.fetchone()
+        if row:
+            if raw_json and not row["raw_json"]:
+                self._conn.execute("UPDATE cgr_dictamenes SET raw_json=? WHERE id=?", (raw_json, str(id)))
+                self._conn.commit()
             return False
         self._conn.execute(
-            "INSERT INTO cgr_dictamenes (id, numero, anio, fecha, organismo_consultante, sumario, source_url, unid, materia) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
-            (str(id), numero, anio, fecha, organismo_consultante, sumario, source_url, unid, materia))
+            "INSERT INTO cgr_dictamenes (id, numero, anio, fecha, organismo_consultante, sumario, source_url, unid, materia, raw_json) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (str(id), numero, anio, fecha, organismo_consultante, sumario, source_url, unid, materia, raw_json))
         self._conn.commit()
         return True
 
@@ -541,6 +591,65 @@ class NormasDB:
 
     def count_dictamenes_cgr(self) -> int:
         return self._conn.execute("SELECT COUNT(*) FROM cgr_dictamenes").fetchone()[0]
+
+    # --- Corpus K-LegalChile: sentencias del Tribunal Constitucional ---
+    def upsert_sentencia_tc(self, id: int, rol: str | None, titulo: str | None,
+                            fecha: str | None, caratulado: str | None,
+                            tipo_proceso: str | None, resultado: str | None,
+                            competencia: str | None, materia: str | None,
+                            considerandos: str | None, decision: str | None,
+                            contenido: str | None, source_url: str | None,
+                            raw_json: str | None = None) -> bool:
+        cur = self._conn.execute("SELECT 1 FROM tc_sentencias WHERE id=?", (int(id),))
+        if cur.fetchone():
+            return False
+        self._conn.execute(
+            "INSERT INTO tc_sentencias (id, rol, titulo, fecha, caratulado, tipo_proceso, resultado, competencia, materia, considerandos, decision, contenido, source_url, raw_json) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (int(id), rol, titulo, fecha, caratulado, tipo_proceso, resultado, competencia,
+             materia, considerandos, decision, contenido, source_url, raw_json))
+        self._conn.commit()
+        return True
+
+    def search_sentencias_tc(self, query: str, limit: int = 10, offset: int = 0) -> list[dict]:
+        try:
+            q = _fts_prefix_query(query)
+        except ValueError:
+            return []
+        sql = """SELECT t.id, t.rol, t.titulo, t.fecha, t.caratulado, t.tipo_proceso,
+                        t.resultado, t.materia, substr(t.considerandos,1,400) AS considerandos_preview,
+                        bm25(tc_sentencias_fts) AS score
+                 FROM tc_sentencias_fts f JOIN tc_sentencias t ON t.rowid=f.rowid
+                 WHERE tc_sentencias_fts MATCH ?
+                 ORDER BY score LIMIT ? OFFSET ?"""
+        rows = self._conn.execute(sql, [q, limit, offset]).fetchall()
+        return [dict(r) for r in rows]
+
+    def consultar_sentencia_tc(self, sentencia_id: int | None = None,
+                               rol: str | None = None) -> dict | None:
+        sql = "SELECT * FROM tc_sentencias WHERE 1=1"
+        params: list = []
+        if sentencia_id:
+            sql += " AND id = ?"
+            params.append(int(sentencia_id))
+        if rol:
+            sql += " AND rol = ?"
+            params.append(str(rol))
+        sql += " ORDER BY fecha DESC LIMIT 1"
+        row = self._conn.execute(sql, params).fetchone()
+        return dict(row) if row else None
+
+    def count_sentencias_tc(self) -> int:
+        return self._conn.execute("SELECT COUNT(*) FROM tc_sentencias").fetchone()[0]
+
+    def listar_sentencias_tc(self, limit: int = 20, offset: int = 0,
+                             recientes: bool = True) -> list[dict]:
+        sql = ("SELECT id, rol, titulo, fecha, caratulado, tipo_proceso, resultado, materia "
+               "FROM tc_sentencias")
+        sql += " ORDER BY fecha DESC" if recientes else " ORDER BY id"
+        sql += " LIMIT ? OFFSET ?"
+        rows = self._conn.execute(sql, [limit, offset]).fetchall()
+        return [dict(r) for r in rows]
 
     def listar_dictamenes_cgr(self, anio: int | None = None, limit: int = 20,
                               offset: int = 0, recientes: bool = True) -> list[dict]:
